@@ -1,0 +1,541 @@
+<script>
+/* Sub-etapa 1.3: Unidades y contratos, Locatarios. Usa las utilidades de IT (ui/App.html). */
+(function () {
+  'use strict';
+  var IT = window.IT, esc = IT.esc, miles = IT.miles;
+  var M = null; // datos de maestros (respuesta de 'maestros')
+
+  var ESTADOS = { vigente: 'Vigente', por_iniciar: 'Por iniciar', terminado: 'Terminado', anulado: 'Anulado' };
+
+  function cargar(fn, suave) {
+    IT.cargando(suave);
+    IT.llamar('maestros').then(function (d) { M = d; fn(); }, function (r) { IT.mensaje(contenido(), r.error); });
+  }
+  function contenido() { return document.getElementById('contenido'); }
+  function porId(lista, campo, id) { for (var i = 0; i < lista.length; i++) if (lista[i][campo] === id) return lista[i]; return null; }
+  function loc(id) { return porId(M.locatarios, 'locatario_id', id) || { razon_social: '—', rut: '', correo: '' }; }
+  function fecha(t) { return t ? t.slice(8, 10) + '-' + t.slice(5, 7) + '-' + t.slice(0, 4) : '—'; }
+  function retro(periodo) { return !!(M.ultimoConfirmado && periodo && periodo <= M.ultimoConfirmado); }
+  function contratosDe(unidadId) {
+    return M.contratos.filter(function (c) { return c.unidad_id === unidadId; })
+      .sort(function (a, b) { return a.fecha_inicio < b.fecha_inicio ? 1 : -1; });
+  }
+  function principal(unidadId) {
+    var cs = contratosDe(unidadId);
+    return cs.filter(function (c) { return c.estado === 'vigente'; })[0] ||
+      cs.filter(function (c) { return c.estado === 'por_iniciar'; }).sort(function (a, b) { return a.fecha_inicio < b.fecha_inicio ? -1 : 1; })[0] || null;
+  }
+  function enlazar(selector, evento, fn) {
+    Array.prototype.forEach.call(document.querySelectorAll(selector), function (el) { el.addEventListener(evento, function (ev) { fn(el, ev); }); });
+  }
+  function valor(id) { var el = document.getElementById(id); return el ? el.value.trim() : ''; }
+  function fallo(idMensaje, boton) {
+    return function (r) { IT.mensaje(document.getElementById(idMensaje), r.error); if (boton) boton.disabled = false; window.scrollTo(0, 0); };
+  }
+  function campoMotivo(visible) {
+    return '<div id="caja-motivo"' + (visible ? '' : ' hidden') + '>' +
+      '<div class="mensaje aviso">Este cambio afecta un mes ya confirmado (' + esc(IT.nombrePeriodo(M.ultimoConfirmado)) +
+      ' o antes): solo la administradora puede hacerlo, con motivo.</div>' +
+      '<label for="f-motivo">Motivo</label><input id="f-motivo" maxlength="200"></div>';
+  }
+
+  // Período desde el que rige el próximo reajuste (aniversario ≤ hoy sin tramo, o el siguiente)
+  function periodoSugeridoReajuste(c) {
+    var ini = c.fecha_inicio.split('-').map(Number), hoy = M.hoy;
+    var ultimoTramo = c.tramos.length ? c.tramos[c.tramos.length - 1].desde_periodo : '';
+    for (var n = 1; n < 60; n++) {
+      var aniv = (ini[0] + n) + '-' + c.fecha_inicio.slice(5);
+      var p = ini[2] === 1 ? aniv.slice(0, 7) : sumarMes(aniv.slice(0, 7));
+      if (p > ultimoTramo || aniv > hoy) return p;
+    }
+    return M.hoy.slice(0, 7);
+  }
+  // 2.1: arriendo en su moneda y meses proporcionales en pesos (con la UF usada)
+  function monto(m, moneda) { return IT.montoArriendo(m, moneda); }
+  function lineaMes(etiqueta, m) {
+    var detalle = m.dias + ' de ' + m.diasMes + ' días' +
+      (m.moneda === 'UF' && m.ufValor ? ' de ' + monto(m.montoTramo, 'UF') + ' × $' + IT.uf(m.ufValor) : '');
+    return esc(etiqueta) + ' (' + esc(IT.nombrePeriodo(m.periodo)) + '): ' +
+      (m.monto === null ? 'se calcula con la UF del ' + esc(fecha(m.ufFecha)) : '$' + esc(miles(m.monto))) + ' (' + esc(detalle) + ')';
+  }
+  /** D116: valor del mes completo, sin nombrar un mes: "11 UF × $41.439,89 = $455.839 (UF del 30-11-2026)". */
+  function valorMensual(montoTramo, moneda, ufValor, ufFecha, sufijo) {
+    if (moneda !== 'UF') return '$' + miles(montoTramo);
+    return monto(montoTramo, 'UF') + (ufValor ? ' × $' + IT.uf(ufValor) + ' = $' + miles(Math.round(montoTramo * ufValor)) + (sufijo || '') + ' (UF del ' + fecha(ufFecha) + ')'
+      : ' · falta la UF del ' + fecha(ufFecha));
+  }
+  /** D116: tarjeta del contrato: valor mensual y, aparte, lo que paga en el mes en curso. */
+  function lineasArriendo(c) {
+    var m = c.arriendoMes;
+    if (!m) return '';
+    var parcial = [c.primerMes, c.ultimoMes].filter(function (x) { return x && x.periodo === m.periodo && x.dias < x.diasMes; })[0];
+    var cobro = parcial ? (parcial.monto === null ? 'paga ' + parcial.dias + ' de ' + parcial.diasMes + ' días (falta la UF)'
+        : 'paga ' + parcial.dias + ' de ' + parcial.diasMes + ' días = $' + miles(parcial.monto))
+      : m.pesosMes === null ? 'mes completo (falta la UF)' : 'mes completo = $' + miles(m.pesosMes);
+    return '<div>Valor mensual: ' + esc(valorMensual(m.montoTramo, m.moneda, m.ufValor, m.ufFecha)) + '</div>' +
+      '<div>' + esc(mayuscula(IT.nombrePeriodo(m.periodo))) + ': <strong>' + esc(cobro) + '</strong></div>';
+  }
+  function mayuscula(t) { return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+  }
+  /** D116: bajo el campo del arriendo, el valor del mes completo con la UF del último día del mes en curso. */
+  function activarValorMensual(idMonto, idMoneda, idSalida) {
+    var pintar = function () {
+      var el = document.getElementById(idSalida), t = valor(idMonto).replace(/\./g, '').replace(',', '.'), n = Number(t);
+      if (!el) return;
+      if (valor(idMoneda) !== 'UF' || !t || isNaN(n) || n <= 0) { el.textContent = ''; return; }
+      el.textContent = valorMensual(n, 'UF', M.ufEnCurso.valor, M.ufEnCurso.fecha, ' al mes');
+    };
+    [idMonto, idMoneda].forEach(function (id) { var e = document.getElementById(id); if (e) e.addEventListener(e.tagName === 'SELECT' ? 'change' : 'input', pintar); });
+    pintar();
+    return pintar;
+  }
+  /** Moneda del arriendo: UF por defecto desde el período de 2.1 (D112); antes, pesos. */
+  function selectorMoneda(id, valor) {
+    return '<select id="' + id + '"><option value="UF"' + (valor === 'UF' ? ' selected' : '') + '>UF</option>' +
+      '<option value="CLP"' + (valor === 'CLP' ? ' selected' : '') + '>Pesos (CLP)</option></select>';
+  }
+
+  function sumarMes(p) { var a = +p.slice(0, 4), m = +p.slice(5, 7); return m === 12 ? (a + 1) + '-01' : a + '-' + (m < 9 ? '0' : '') + (m + 1); }
+
+  // ------------------------------------------------------------ Unidades y contratos
+  IT.vistas.contratos = function (aviso, extra) {
+    cargar(function () {
+      if (extra && extra.unidad) return detalleUnidad(extra.unidad, aviso, extra);
+      listaUnidades(aviso);
+    });
+  };
+
+  var filtroTexto = '', filtroEstado = 'todas';
+
+  function listaUnidades(aviso) {
+    var c = contenido();
+    c.innerHTML = '<h1>Unidades y contratos</h1>' + (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '') +
+      '<div class="filtros">' + IT.buscador('b-texto', 'Buscar unidad, locatario o RUT', filtroTexto) +
+      '<select id="b-estado"><option value="todas">Todas</option><option value="ocupadas">Ocupadas</option>' +
+      '<option value="vacias">Vacías</option><option value="pronto">Por iniciar o por terminar</option></select></div>' +
+      '<div id="lista"></div>';
+    document.getElementById('b-estado').value = filtroEstado;
+    var pintar = function () {
+      filtroTexto = valor('b-texto'); filtroEstado = document.getElementById('b-estado').value;
+      var t = filtroTexto.toLowerCase();
+      var filas = M.unidades.slice().sort(function (a, b) { return a.orden - b.orden; }).filter(function (u) {
+        var p = principal(u.unidad_id), l = p ? loc(p.locatario_id) : null;
+        var texto = (u.unidad_id + ' ' + u.nombre + ' ' + (l ? l.razon_social + ' ' + l.rut : '')).toLowerCase();
+        if (t && texto.indexOf(t) === -1) return false;
+        var ocupada = p && p.estado === 'vigente';
+        if (filtroEstado === 'ocupadas' && !ocupada) return false;
+        if (filtroEstado === 'vacias' && (ocupada || u.tipo === 'calle')) return false;
+        if (filtroEstado === 'pronto' && !(p && (p.estado === 'por_iniciar' || p.fecha_fin))) return false;
+        return true;
+      });
+      document.getElementById('lista').innerHTML = filas.map(filaUnidad).join('') || '<p class="suave">Sin resultados.</p>';
+      enlazar('[data-unidad]', 'click', function (el, ev) { ev.preventDefault(); detalleUnidad(el.getAttribute('data-unidad')); });
+    };
+    IT.activarBuscador('b-texto', pintar);
+    document.getElementById('b-estado').addEventListener('change', pintar);
+    pintar();
+  }
+
+  function filaUnidad(u) {
+    var p = principal(u.unidad_id);
+    var etiqueta, detalle = '';
+    if (u.tipo === 'calle') etiqueta = '<span class="etiqueta">área común</span>';
+    else if (!p) etiqueta = '<span class="etiqueta">vacía</span>';
+    else if (p.estado === 'por_iniciar') etiqueta = '<span class="etiqueta pronto">por iniciar ' + esc(fecha(p.fecha_inicio)) + '</span>';
+    else etiqueta = '<span class="etiqueta ok">ocupada</span>' + (p.fecha_fin ? ' <span class="etiqueta pronto">termina ' + esc(fecha(p.fecha_fin)) + '</span>' : '');
+    if (p) detalle = '<div class="suave">' + esc(loc(p.locatario_id).razon_social) + ' · ' + esc(monto(p.arriendo, p.moneda)) + (p.paga_gc ? ' · paga GC' : ' · no paga GC') + '</div>';
+    if (!u.activa) etiqueta += ' <span class="etiqueta alerta">inactiva</span>';
+    return '<a href="#" class="fila" data-unidad="' + esc(u.unidad_id) + '"><div class="titulo-fila">' + esc(u.nombre) + ' ' + etiqueta + '</div>' + detalle + '</a>';
+  }
+
+  function detalleUnidad(unidadId, aviso, extra) {
+    var u = porId(M.unidades, 'unidad_id', unidadId);
+    var cs = contratosDe(unidadId);
+    var actuales = cs.filter(function (c) { return c.estado === 'vigente' || c.estado === 'por_iniciar'; });
+    var anteriores = cs.filter(function (c) { return c.estado === 'terminado' || (c.estado === 'anulado' && M.esAdmin); });
+    var meds = M.medidores.filter(function (m) { return m.unidad_id === unidadId; });
+    var c = contenido();
+    c.innerHTML = '<a href="#" class="volver" id="volver">← Unidades</a><h1>' + esc(u.nombre) + '</h1><div id="m-detalle"></div>' +
+      (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '') +
+      (u.tipo === 'calle' ? '<p class="suave">Área común: su consumo se reparte como Luz GC / Agua GC.</p>'
+        : (actuales.length ? actuales.map(tarjetaContrato).join('') : '<p class="suave">Sin contrato vigente.</p>') +
+          (IT.soloLectura() ? '' : '<div class="acciones"><button class="boton" id="b-nuevo">Nuevo contrato</button></div>')) +
+      // Siempre visible, aunque esté en 0, para saber que no falta nada (D90). Las calles no tienen contratos.
+      (u.tipo === 'calle' ? '' : '<details><summary>Contratos anteriores (' + anteriores.length + ')</summary>' +
+        (anteriores.length ? anteriores.map(tarjetaContrato).join('') : '<p class="suave">Esta unidad no ha tenido contratos anteriores.</p>') + '</details>') +
+      '<h2>Medidores</h2>' + (meds.map(function (m) {
+        return '<div class="tarjeta"><strong>' + esc(m.servicio === 'luz' ? 'Luz' : 'Agua') + '</strong> · ' + esc(m.medidor_id) +
+          ' <span class="etiqueta">' + esc(m.estado) + '</span><div class="suave">N° de serie: ' + esc(m.n_serie || '—') +
+          ' · instalado: ' + esc(fecha(m.fecha_instalacion)) + '</div>' +
+          (M.esAdmin ? '<div class="acciones"><button class="boton secundario chico" data-medidor="' + esc(m.medidor_id) + '">Editar</button></div>' : '') + '</div>';
+      }).join('') || '<p class="suave">Sin medidores.</p>') +
+      (M.esAdmin ? '<h2>Unidad</h2><div class="tarjeta"><label for="u-notas">Notas</label><textarea id="u-notas">' + esc(u.notas || '') + '</textarea>' +
+        '<label class="casilla"><input type="checkbox" id="u-activa"' + (u.activa ? ' checked' : '') + '> Unidad activa</label>' +
+        // D94: el GC se divide entre las unidades marcadas, estén ocupadas o no
+        (u.tipo === 'calle' ? '' : '<label class="casilla"><input type="checkbox" id="u-cuenta-gc"' + (u.cuenta_gc ? ' checked' : '') +
+          '> Cuenta en el divisor del gasto común</label><p class="suave" style="margin:.25rem 0 0">Si está vacía o no paga, su parte la absorbe la administración.</p>' +
+          '<div class="rejilla"><div><label for="u-sugerido">Arriendo sugerido (opcional)</label><input id="u-sugerido" inputmode="decimal" value="' +
+          esc(u.arriendo_sugerido === null ? '' : String(u.arriendo_sugerido).replace('.', ',')) + '"></div>' +
+          '<div><label for="u-moneda">Moneda</label>' + selectorMoneda('u-moneda', u.moneda_sugerido) + '</div></div>' +
+          '<p class="suave" style="margin:.25rem 0 0">Aparece al crear un contrato; hay que tocar "Usar" para copiarlo.</p>') +
+        '<div class="acciones"><button class="boton secundario" id="b-unidad">Guardar unidad</button></div></div>' : '');
+
+    document.getElementById('volver').addEventListener('click', function (ev) { ev.preventDefault(); listaUnidades(); });
+    var bn = document.getElementById('b-nuevo');
+    if (bn) bn.addEventListener('click', function () { formContrato(unidadId, null); });
+    enlazar('[data-accion]', 'click', function (el) { accionContrato(el.getAttribute('data-accion'), el.getAttribute('data-id'), el); });
+    enlazar('[data-medidor]', 'click', function (el) { formMedidor(el.getAttribute('data-medidor')); });
+    enlazar('[data-locatario]', 'click', function (el, ev) { ev.preventDefault(); fichaLocatario(el.getAttribute('data-locatario')); });
+    var bu = document.getElementById('b-unidad');
+    if (bu) bu.addEventListener('click', function () {
+      bu.disabled = true;
+      var cgc = document.getElementById('u-cuenta-gc');
+      IT.llamar('editarUnidad', { unidad_id: unidadId, notas: valor('u-notas'), activa: document.getElementById('u-activa').checked,
+        cuenta_gc: cgc ? cgc.checked : undefined,
+        arriendo_sugerido: document.getElementById('u-sugerido') ? valor('u-sugerido') : undefined,
+        moneda_sugerido: document.getElementById('u-moneda') ? valor('u-moneda') : undefined })
+        .then(function () { recargarDetalle(unidadId, 'Unidad guardada.', true); }, fallo('m-detalle', bu));
+    });
+    if (extra && extra.reajuste) {
+      var vig = actuales.filter(function (x) { return x.estado === 'vigente'; })[0];
+      if (vig) formReajuste(vig);
+    }
+  }
+
+  /** suave: se guardó desde el mismo detalle (sin formulario), así que se mantiene la posición. */
+  function recargarDetalle(unidadId, aviso, suave) {
+    cargar(function () { detalleUnidad(unidadId, aviso); }, suave);
+  }
+
+  function tarjetaContrato(c) {
+    var l = loc(c.locatario_id), activo = c.estado === 'vigente' || c.estado === 'por_iniciar';
+    var tramos = c.tramos.map(function (t) {
+      return '<tr><td>' + esc(IT.nombrePeriodo(t.desde_periodo)) + '</td><td class="num">' + esc(monto(t.monto, t.moneda)) + '</td><td>' + esc(t.motivo) +
+        (t.comentario ? '<div class="suave">' + esc(t.comentario) + '</div>' : '') + '</td>' +
+        (M.esAdmin && activo ? '<td>' + (c.tramos.length > 1 ? '<button class="boton peligro chico" data-accion="anularTramo" data-id="' + esc(t.tramo_id) + '">Anular</button>' : '') + '</td>' : '') + '</tr>';
+    }).join('');
+    return '<div class="tarjeta">' +
+      '<div class="titulo-fila"><strong>' + esc(c.contrato_id) + '</strong> <span class="etiqueta' + (c.estado === 'vigente' ? ' ok' : c.estado === 'anulado' ? ' alerta' : '') + '">' + esc(ESTADOS[c.estado]) + '</span></div>' +
+      '<dl class="datos"><dt>Locatario</dt><dd><a href="#" data-locatario="' + esc(c.locatario_id) + '">' + esc(l.razon_social) + '</a></dd>' +
+      '<dt>RUT</dt><dd>' + esc(l.rut) + '</dd>' + (IT.soloLectura() ? '' : '<dt>Correo</dt><dd>' + esc(l.correo || '—') + '</dd>') +
+      '<dt>Inicio</dt><dd>' + esc(fecha(c.fecha_inicio)) + '</dd><dt>Término</dt><dd>' + esc(c.fecha_fin ? fecha(c.fecha_fin) + ' (último día pagado)' : 'Sin término') + '</dd>' +
+      '<dt>Paga GC</dt><dd>' + (c.paga_gc ? 'Sí' : 'No') + '</dd>' +
+      (c.garantia_monto !== '' && c.garantia_monto !== null && c.garantia_monto !== undefined ? '<dt>Garantía</dt><dd>$' + esc(miles(c.garantia_monto)) + '</dd>' : '') +
+      (c.notas ? '<dt>Notas</dt><dd>' + esc(c.notas) + '</dd>' : '') + '</dl>' +
+      '<strong>Arriendo</strong><table class="tramos"><tr><th>Desde</th><th>Monto</th><th>Motivo</th>' + (M.esAdmin && activo ? '<th></th>' : '') + '</tr>' + tramos + '</table>' +
+      lineasArriendo(c) +
+      // El primer o último mes parcial se muestra aparte solo si no es el mes en curso (ese ya está arriba, D116)
+      (c.primerMes && c.primerMes.dias < c.primerMes.diasMes && !(c.arriendoMes && c.primerMes.periodo === c.arriendoMes.periodo)
+        ? '<div class="suave">' + lineaMes('Primer mes', c.primerMes) + '</div>' : '') +
+      (c.ultimoMes && !(c.arriendoMes && c.ultimoMes.periodo === c.arriendoMes.periodo)
+        ? '<div class="suave">' + lineaMes(c.ultimoMes.unico ? 'Único mes' : 'Último mes', c.ultimoMes) + '</div>' : '') +
+      // D98: la administradora también puede corregir un contrato terminado (fechas, notas); el servidor pide motivo si toca un mes confirmado
+      (!activo && c.estado === 'terminado' && M.esAdmin ? '<div class="acciones"><button class="boton secundario chico" data-accion="editar" data-id="' + esc(c.contrato_id) + '">Editar</button></div>' : '') +
+      (activo && !IT.soloLectura() ? '<div class="acciones">' +
+        '<button class="boton secundario chico" data-accion="editar" data-id="' + esc(c.contrato_id) + '">Editar</button>' +
+        '<button class="boton secundario chico" data-accion="reajuste" data-id="' + esc(c.contrato_id) + '">Cambiar arriendo</button>' +
+        '<button class="boton secundario chico" data-accion="terminar" data-id="' + esc(c.contrato_id) + '">Terminar contrato</button>' +
+        (M.esAdmin ? '<button class="boton peligro chico" data-accion="anular" data-id="' + esc(c.contrato_id) + '">Anular</button>' : '') +
+        '</div>' : '') + '</div>';
+  }
+
+  function accionContrato(accion, id, boton) {
+    if (accion === 'anularTramo') {
+      var motivo = prompt('Motivo para anular este arriendo (queda registrado):');
+      if (!motivo) return;
+      var unidad = M.contratos.filter(function (c) { return c.tramos.some(function (t) { return t.tramo_id === id; }); })[0].unidad_id;
+      boton.disabled = true;
+      return IT.llamar('anularTramo', { tramo_id: id, motivo: motivo }).then(function () { recargarDetalle(unidad, 'Arriendo anulado.', true); }, fallo('m-detalle', boton));
+    }
+    var c = porId(M.contratos, 'contrato_id', id);
+    if (accion === 'editar') return formContrato(c.unidad_id, c);
+    if (accion === 'reajuste') return formReajuste(c);
+    if (accion === 'terminar') return formTerminar(c);
+    if (accion === 'anular') {
+      var m = prompt('Anular ' + id + ' solo si fue un error de ingreso. Motivo (queda registrado):');
+      if (!m) return;
+      boton.disabled = true;
+      IT.llamar('anularContrato', { contrato_id: id, motivo: m }).then(function () { recargarDetalle(c.unidad_id, 'Contrato anulado.', true); }, fallo('m-detalle', boton));
+    }
+  }
+
+  // ------------------------------------------------------------ Formulario de contrato
+  var borrador = null; // valores del formulario mientras se crea un locatario nuevo
+
+  function formContrato(unidadId, c, valores) {
+    var u = porId(M.unidades, 'unidad_id', unidadId), nuevo = !c;
+    var v = valores || (c ? { locatario_id: c.locatario_id, fecha_inicio: c.fecha_inicio, fecha_fin: c.fecha_fin, paga_gc: c.paga_gc,
+      garantia_monto: c.garantia_monto, notas: c.notas } : { paga_gc: true });
+    // D115: los ocultos no se ofrecen (salvo el que ya tiene el contrato)
+    var opciones = M.locatarios.filter(function (l) { return !l.oculto || l.locatario_id === v.locatario_id; }).sort(function (a, b) { return a.razon_social.localeCompare(b.razon_social, 'es'); })
+      .map(function (l) { return '<option value="' + esc(l.locatario_id) + '"' + (l.locatario_id === v.locatario_id ? ' selected' : '') + '>' + esc(l.razon_social) + ' · ' + esc(l.rut) + '</option>'; }).join('');
+    contenido().innerHTML = '<a href="#" class="volver" id="volver">← ' + esc(u.nombre) + '</a>' +
+      '<h1>' + (nuevo ? 'Nuevo contrato · ' : 'Editar ' + esc(c.contrato_id) + ' · ') + esc(u.nombre) + '</h1><div id="m-form"></div>' +
+      '<div class="tarjeta"><form id="f-contrato" autocomplete="off">' +
+      '<label for="f-loc">Locatario</label><select id="f-loc" required><option value="">Elige…</option>' + opciones + '</select>' +
+      '<div class="acciones"><button type="button" class="boton secundario chico" id="b-nuevo-loc">+ Nuevo locatario</button></div>' +
+      '<div class="rejilla"><div><label for="f-inicio">Inicio</label><input type="date" id="f-inicio" required value="' + esc(v.fecha_inicio || '') + '"></div>' +
+      '<div><label for="f-fin">Término: último día pagado (opcional)</label><input type="date" id="f-fin" value="' + esc(v.fecha_fin || '') + '"></div></div>' +
+      (nuevo ? '<div class="rejilla"><div><label for="f-monto">Arriendo mensual</label><input id="f-monto" inputmode="decimal" required value="' + esc(v.monto || '') + '"></div>' +
+        '<div><label for="f-moneda">Moneda</label>' + selectorMoneda('f-moneda', v.moneda || 'UF') + '</div></div>' +
+        '<p class="suave" id="f-valor-mes" style="margin:.25rem 0 0"></p>' +
+        // D110: el sugerido no se copia solo; hay que tocar "Usar"
+        (u.arriendo_sugerido !== null ? '<p class="suave" style="margin:.25rem 0 0">Sugerido para este local: ' + esc(monto(u.arriendo_sugerido, u.moneda_sugerido)) +
+          ' · <a href="#" id="f-usar">Usar</a></p>' : '') +
+        '<label for="f-coment">Comentario (obligatorio si es $0)</label><input id="f-coment" value="' + esc(v.comentario || '') + '">' : '') +
+      '<label class="casilla"><input type="checkbox" id="f-gc"' + (v.paga_gc !== false ? ' checked' : '') + '> Paga gastos comunes</label>' +
+      '<div class="rejilla"><div><label for="f-gar">Garantía (opcional, CLP)</label><input id="f-gar" inputmode="numeric" value="' + esc(v.garantia_monto === undefined || v.garantia_monto === null ? '' : v.garantia_monto) + '"></div>' +
+      '<div><label for="f-notas">Notas</label><input id="f-notas" value="' + esc(v.notas || '') + '"></div></div>' +
+      '<div id="vista-previa" class="suave" style="margin-top:.75rem"></div>' + campoMotivo(false) +
+      '<button class="boton ancho" type="submit">' + (nuevo ? 'Crear contrato' : 'Guardar cambios') + '</button></form></div>';
+
+    var leer = function () {
+      return { locatario_id: valor('f-loc'), fecha_inicio: valor('f-inicio'), fecha_fin: valor('f-fin'),
+        monto: nuevo ? valor('f-monto') : (c.tramos[0] ? c.tramos[0].monto : ''), comentario: nuevo ? valor('f-coment') : '',
+        moneda: nuevo ? valor('f-moneda') : (c.tramos[0] ? c.tramos[0].moneda : 'CLP'),
+        paga_gc: document.getElementById('f-gc').checked, garantia_monto: valor('f-gar'), notas: valor('f-notas') };
+    };
+    var esRetro = function () {
+      var d = leer();
+      if (nuevo) return retro(d.fecha_inicio.slice(0, 7));
+      var cambiaBase = d.fecha_inicio !== c.fecha_inicio || d.locatario_id !== c.locatario_id || d.paga_gc !== c.paga_gc;
+      var cambiaFin = d.fecha_fin !== (c.fecha_fin || '');
+      return (cambiaBase && retro(c.fecha_inicio.slice(0, 7))) || (cambiaFin && (retro((c.fecha_fin || '').slice(0, 7)) || retro(d.fecha_fin.slice(0, 7))));
+    };
+    var temporizador;
+    var previa = function () {
+      document.getElementById('caja-motivo').hidden = !esRetro();
+      clearTimeout(temporizador);
+      var d = leer();
+      if (!d.fecha_inicio || !d.locatario_id) { document.getElementById('vista-previa').textContent = ''; return; }
+      temporizador = setTimeout(function () {
+        IT.llamar('previsualizarContrato', Object.assign({ unidad_id: unidadId, contrato_id: c ? c.contrato_id : null }, d)).then(function (r) {
+          var el = document.getElementById('vista-previa');
+          if (!el) return;
+          if (r.error) { el.innerHTML = '<div class="mensaje error">' + esc(r.error) + '</div>'; return; }
+          el.innerHTML = (r.primerMes ? lineaMes('Primer mes', r.primerMes) : '') +
+            (r.ultimoMes ? (r.primerMes ? '<br>' : '') + lineaMes(r.ultimoMes.unico ? 'Único mes' : 'Último mes', r.ultimoMes) : '');
+        }, function () {});
+      }, 600);
+    };
+    var usar = document.getElementById('f-usar');
+    if (usar) usar.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      document.getElementById('f-monto').value = String(u.arriendo_sugerido).replace('.', ',');
+      document.getElementById('f-moneda').value = u.moneda_sugerido;
+      if (valorMes) valorMes();
+      previa();
+    });
+    var valorMes = nuevo ? activarValorMensual('f-monto', 'f-moneda', 'f-valor-mes') : null;
+    ['f-loc', 'f-inicio', 'f-fin', 'f-monto', 'f-moneda', 'f-gc'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener(el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input', previa);
+    });
+    previa();
+    document.getElementById('volver').addEventListener('click', function (ev) { ev.preventDefault(); detalleUnidad(unidadId); });
+    document.getElementById('b-nuevo-loc').addEventListener('click', function () {
+      borrador = leer();
+      formLocatario(null, function (locatarioId) {
+        cargar(function () { var b = borrador; b.locatario_id = locatarioId; formContrato(unidadId, c ? porId(M.contratos, 'contrato_id', c.contrato_id) : null, b); });
+      }, function () { formContrato(unidadId, c, borrador); });
+    });
+    document.getElementById('f-contrato').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var d = leer(), boton = ev.target.querySelector('button[type=submit]');
+      boton.disabled = true;
+      var motivo = valor('f-motivo');
+      var promesa = nuevo
+        ? IT.llamar('crearContrato', Object.assign({ unidad_id: unidadId, motivo: motivo }, d))
+        : IT.llamar('editarContrato', { contrato_id: c.contrato_id, motivo: motivo, cambios: {
+            locatario_id: d.locatario_id, fecha_inicio: d.fecha_inicio, fecha_fin: d.fecha_fin, paga_gc: d.paga_gc,
+            garantia_monto: d.garantia_monto, notas: d.notas } });
+      promesa.then(function () { recargarDetalle(unidadId, nuevo ? 'Contrato creado.' : 'Contrato actualizado.'); }, fallo('m-form', boton));
+    });
+  }
+
+  /** Selector de período (D92) para el reajuste: desde el inicio del contrato hasta 2 años después del sugerido. */
+  function selectorReajuste(c, sugerido) {
+    var desde = c.fecha_inicio.slice(0, 7), hasta = IT.sumarMesPeriodo(sugerido > M.hoy.slice(0, 7) ? sugerido : M.hoy.slice(0, 7), 24);
+    var permitidos = [], estados = {};
+    for (var p = desde; p <= hasta; p = IT.sumarMesPeriodo(p, 1)) {
+      permitidos.push(p);
+      if (M.ultimoConfirmado && p <= M.ultimoConfirmado) estados[p] = 'confirmado';
+    }
+    var enCurso = M.ultimoConfirmado ? IT.sumarMesPeriodo(M.ultimoConfirmado, 1) : M.hoy.slice(0, 7);
+    return IT.selectorPeriodo({ id: 't-desde', valor: sugerido, permitidos: permitidos, enCurso: enCurso, estados: estados, etiqueta: 'Rige desde (mes)' });
+  }
+
+  function formReajuste(c) {
+    var u = porId(M.unidades, 'unidad_id', c.unidad_id);
+    var sugerido = periodoSugeridoReajuste(c);
+    var ult = c.tramos.length ? c.tramos[c.tramos.length - 1] : null;
+    // 2.1: desde el período de la UF el sugerido es ese mes, en UF (salvo que el contrato ya tenga un tramo desde ahí)
+    if (sugerido < M.periodoUf && (!ult || ult.desde_periodo < M.periodoUf)) sugerido = M.periodoUf;
+    var monedaInicial = ult && ult.moneda === 'UF' ? 'UF' : sugerido >= M.periodoUf ? 'UF' : 'CLP';
+    contenido().innerHTML = '<a href="#" class="volver" id="volver">← ' + esc(u.nombre) + '</a><h1>Cambiar arriendo · ' + esc(u.nombre) + '</h1>' +
+      '<p class="suave">' + esc(loc(c.locatario_id).razon_social) + ' · arriendo actual ' + esc(ult ? monto(ult.monto, ult.moneda) : '—') + '</p><div id="m-form"></div>' +
+      '<div class="tarjeta"><form id="f-tramo" autocomplete="off">' +
+      '<label>Rige desde (mes)</label>' + selectorReajuste(c, sugerido) +
+      '<div class="rejilla"><div><label for="t-monto">Nuevo arriendo mensual</label><input id="t-monto" inputmode="decimal" required></div>' +
+      '<div><label for="t-moneda">Moneda</label>' + selectorMoneda('t-moneda', monedaInicial) + '</div></div>' +
+      '<p class="suave" id="t-valor-mes" style="margin:.25rem 0 0"></p>' +
+      '<label for="t-motivo">Motivo</label><select id="t-motivo">' + M.motivosTramo.filter(function (x) { return x !== 'Inicial'; })
+        // 2.1: con la UF ya no hay reajustes; lo normal es renegociar
+        .map(function (x) { return '<option' + (x === 'Renegociación' ? ' selected' : '') + '>' + esc(x) + '</option>'; }).join('') + '</select>' +
+      '<label for="t-coment">Comentario (obligatorio si es $0)</label><input id="t-coment">' + campoMotivo(retro(sugerido)) +
+      '<button class="boton ancho" type="submit">Guardar arriendo</button></form></div>';
+    document.getElementById('volver').addEventListener('click', function (ev) { ev.preventDefault(); detalleUnidad(c.unidad_id); });
+    document.getElementById('t-desde').addEventListener('input', function () { document.getElementById('caja-motivo').hidden = !retro(valor('t-desde')); });
+    activarValorMensual('t-monto', 't-moneda', 't-valor-mes');
+    document.getElementById('f-tramo').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var boton = ev.target.querySelector('button');
+      boton.disabled = true;
+      IT.llamar('agregarTramo', { contrato_id: c.contrato_id, desde_periodo: valor('t-desde'), monto: valor('t-monto'), moneda: valor('t-moneda'),
+        motivo: valor('t-motivo'), comentario: valor('t-coment'), motivo_retroactivo: valor('f-motivo') })
+        .then(function () { recargarDetalle(c.unidad_id, 'Arriendo guardado.'); }, fallo('m-form', boton));
+    });
+  }
+
+  function formTerminar(c) {
+    var u = porId(M.unidades, 'unidad_id', c.unidad_id);
+    contenido().innerHTML = '<a href="#" class="volver" id="volver">← ' + esc(u.nombre) + '</a><h1>Terminar ' + esc(c.contrato_id) + ' · ' + esc(u.nombre) + '</h1>' +
+      '<p class="suave">' + esc(loc(c.locatario_id).razon_social) + '</p><div id="m-form"></div>' +
+      '<div class="tarjeta"><form id="f-term">' +
+      '<label for="x-fin">Último día pagado</label><input type="date" id="x-fin" required value="' + esc(c.fecha_fin || '') + '">' +
+      '<div id="vista-previa" class="suave" style="margin-top:.75rem"></div>' + campoMotivo(false) +
+      '<button class="boton ancho" type="submit">Terminar contrato</button></form></div>';
+    var previa = function () {
+      var fin = valor('x-fin');
+      document.getElementById('caja-motivo').hidden = !(retro(fin.slice(0, 7)) || retro((c.fecha_fin || '').slice(0, 7)));
+      if (!fin) return;
+      IT.llamar('previsualizarContrato', { unidad_id: c.unidad_id, contrato_id: c.contrato_id, locatario_id: c.locatario_id,
+        fecha_inicio: c.fecha_inicio, fecha_fin: fin, monto: c.arriendo, moneda: c.moneda }).then(function (r) {
+        var el = document.getElementById('vista-previa');
+        if (!el) return;
+        el.innerHTML = r.error ? '<div class="mensaje error">' + esc(r.error) + '</div>' : r.ultimoMes
+          ? lineaMes(r.ultimoMes.unico ? 'Único mes' : 'Último mes', r.ultimoMes) : '';
+      }, function () {});
+    };
+    document.getElementById('x-fin').addEventListener('change', previa);
+    previa();
+    document.getElementById('volver').addEventListener('click', function (ev) { ev.preventDefault(); detalleUnidad(c.unidad_id); });
+    document.getElementById('f-term').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var boton = ev.target.querySelector('button');
+      boton.disabled = true;
+      IT.llamar('terminarContrato', { contrato_id: c.contrato_id, fecha_fin: valor('x-fin'), motivo: valor('f-motivo') })
+        .then(function () { recargarDetalle(c.unidad_id, 'Contrato terminado.'); }, fallo('m-form', boton));
+    });
+  }
+
+  function formMedidor(medidorId) {
+    var m = porId(M.medidores, 'medidor_id', medidorId);
+    contenido().innerHTML = '<a href="#" class="volver" id="volver">← Volver</a><h1>Medidor ' + esc(medidorId) + '</h1><div id="m-form"></div>' +
+      '<div class="tarjeta"><form id="f-med"><label for="md-serie">N° de serie</label><input id="md-serie" value="' + esc(m.n_serie || '') + '">' +
+      '<label for="md-fecha">Fecha de instalación</label><input type="date" id="md-fecha" value="' + esc(m.fecha_instalacion || '') + '">' +
+      '<button class="boton ancho" type="submit">Guardar</button></form></div>';
+    document.getElementById('volver').addEventListener('click', function (ev) { ev.preventDefault(); detalleUnidad(m.unidad_id); });
+    document.getElementById('f-med').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var boton = ev.target.querySelector('button');
+      boton.disabled = true;
+      IT.llamar('editarMedidor', { medidor_id: medidorId, n_serie: valor('md-serie'), fecha_instalacion: valor('md-fecha') })
+        .then(function () { recargarDetalle(m.unidad_id, 'Medidor guardado.'); }, fallo('m-form', boton));
+    });
+  }
+
+  // ------------------------------------------------------------ Locatarios
+  IT.vistas.locatarios = function (aviso) { cargar(function () { listaLocatarios(aviso); }); };
+
+  var filtroLoc = '', verOcultos = false;
+
+  function listaLocatarios(aviso) {
+    contenido().innerHTML = '<h1>Locatarios</h1>' + (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '') +
+      '<div class="filtros">' + IT.buscador('l-texto', 'Buscar por nombre o RUT', filtroLoc) +
+      (IT.soloLectura() ? '' : '<button class="boton" id="l-nuevo">+ Nuevo locatario</button>') + '</div>' +
+      (M.locatarios.some(function (l) { return l.oculto; }) ? '<label class="casilla"><input type="checkbox" id="l-ocultos"' + (verOcultos ? ' checked' : '') + '> Mostrar ocultos</label>' : '') +
+      '<div id="l-lista"></div>';
+    var pintar = function () {
+      filtroLoc = valor('l-texto');
+      var t = filtroLoc.toLowerCase();
+      var filas = M.locatarios.filter(function (l) { return (verOcultos || !l.oculto) && (!t || (l.razon_social + ' ' + l.rut + ' ' + (l.nombre_contacto || '')).toLowerCase().indexOf(t) !== -1); })
+        .sort(function (a, b) { return a.razon_social.localeCompare(b.razon_social, 'es'); });
+      document.getElementById('l-lista').innerHTML = filas.map(function (l) {
+        var unidades = M.contratos.filter(function (c) { return c.locatario_id === l.locatario_id && (c.estado === 'vigente' || c.estado === 'por_iniciar'); })
+          .map(function (c) { return porId(M.unidades, 'unidad_id', c.unidad_id).nombre; });
+        return '<a href="#" class="fila' + (l.oculto ? ' oculto' : '') + '" data-loc="' + esc(l.locatario_id) + '"><div class="titulo-fila">' + esc(l.razon_social) +
+          (l.oculto ? ' <span class="etiqueta">oculto</span>' : '') + '</div>' +
+          '<div class="suave">' + esc(l.rut) + ' · ' + esc(unidades.length ? unidades.join(', ') : 'sin contrato vigente') + '</div></a>';
+      }).join('') || '<p class="suave">Sin resultados.</p>';
+      enlazar('[data-loc]', 'click', function (el, ev) { ev.preventDefault(); fichaLocatario(el.getAttribute('data-loc')); });
+    };
+    IT.activarBuscador('l-texto', pintar);
+    var cajaOcultos = document.getElementById('l-ocultos');
+    if (cajaOcultos) cajaOcultos.addEventListener('change', function () { verOcultos = cajaOcultos.checked; pintar(); });
+    if (!IT.soloLectura()) document.getElementById('l-nuevo').addEventListener('click', function () {
+      formLocatario(null, function (id, aviso2) { cargar(function () { fichaLocatario(id, aviso2 || 'Locatario creado.'); }); }, function () { listaLocatarios(); });
+    });
+    pintar();
+  }
+
+  function fichaLocatario(id, aviso) {
+    IT.estado.vista = 'locatarios';
+    var l = loc(id);
+    var cs = M.contratos.filter(function (c) { return c.locatario_id === id && c.estado !== 'anulado'; });
+    contenido().innerHTML = '<a href="#" class="volver" id="volver">← Locatarios</a><h1>' + esc(l.razon_social) + '</h1>' +
+      (aviso ? '<div class="mensaje ' + (aviso.indexOf('¿') !== -1 ? 'aviso' : 'exito') + '">' + esc(aviso) + '</div>' : '') +
+      '<div class="tarjeta"><dl class="datos"><dt>RUT</dt><dd>' + esc(l.rut) + '</dd><dt>Contacto</dt><dd>' + esc(l.nombre_contacto || '—') + '</dd>' +
+      (IT.soloLectura() ? '' : '<dt>Correo</dt><dd>' + esc(l.correo || '—') + '</dd>') + '<dt>Teléfono</dt><dd>' + esc(l.telefono || '—') + '</dd>' +
+      (l.notas ? '<dt>Notas</dt><dd>' + esc(l.notas) + '</dd>' : '') + '</dl>' +
+      (l.oculto ? '<div class="mensaje aviso">Oculto: no aparece para elegir en contratos ni pagos.</div>' : '') +
+      (IT.soloLectura() ? '' : '<div class="acciones"><button class="boton secundario" id="l-editar">Editar</button>' +
+        (M.esAdmin ? '<button class="boton secundario" id="l-ocultar">' + (l.oculto ? 'Mostrar de nuevo' : 'Ocultar') + '</button>' : '') + '</div>') +
+      '<div id="m-loc"></div></div>' +
+      '<h2>Contratos</h2>' + (cs.map(function (c) {
+        var u = porId(M.unidades, 'unidad_id', c.unidad_id);
+        return '<a href="#" class="fila" data-unidad="' + esc(c.unidad_id) + '"><div class="titulo-fila">' + esc(u.nombre) + ' <span class="etiqueta">' + esc(ESTADOS[c.estado]) + '</span></div>' +
+          '<div class="suave">' + esc(fecha(c.fecha_inicio)) + ' → ' + esc(c.fecha_fin ? fecha(c.fecha_fin) : 'sin término') + ' · ' + esc(monto(c.arriendo, c.moneda)) + '</div></a>';
+      }).join('') || '<p class="suave">Sin contratos.</p>');
+    document.getElementById('volver').addEventListener('click', function (ev) { ev.preventDefault(); listaLocatarios(); });
+    if (!IT.soloLectura()) document.getElementById('l-editar').addEventListener('click', function () {
+      formLocatario(l, function (lid, aviso2) { cargar(function () { fichaLocatario(lid, aviso2 || 'Locatario actualizado.'); }); }, function () { fichaLocatario(id); });
+    });
+    enlazar('[data-unidad]', 'click', function (el, ev) { ev.preventDefault(); IT.estado.vista = 'contratos'; detalleUnidad(el.getAttribute('data-unidad')); });
+    var bo = document.getElementById('l-ocultar');
+    if (bo) bo.addEventListener('click', function () {
+      bo.disabled = true;
+      IT.llamar('ocultarLocatario', { locatario_id: id, oculto: !l.oculto }).then(function () {
+        cargar(function () { fichaLocatario(id, l.oculto ? 'Locatario visible de nuevo.' : 'Locatario oculto.'); }, true);
+      }, fallo('m-loc', bo));
+    });
+  }
+
+  /** alGuardar(locatario_id, aviso) · alVolver() */
+  function formLocatario(l, alGuardar, alVolver) {
+    l = l || {};
+    contenido().innerHTML = '<a href="#" class="volver" id="volver">← Volver</a><h1>' + (l.locatario_id ? 'Editar locatario' : 'Nuevo locatario') + '</h1><div id="m-form"></div>' +
+      '<div class="tarjeta"><form id="f-loc" autocomplete="off"><div class="rejilla">' +
+      '<div><label for="lc-rut">RUT</label><input id="lc-rut" required placeholder="12345678-9" value="' + esc(l.rut || '') + '"></div>' +
+      '<div><label for="lc-razon">Razón social o nombre</label><input id="lc-razon" required value="' + esc(l.razon_social || '') + '"></div>' +
+      '<div><label for="lc-contacto">Nombre de contacto (opcional)</label><input id="lc-contacto" value="' + esc(l.nombre_contacto || '') + '"></div>' +
+      '<div><label for="lc-correo">Correo</label><input id="lc-correo" type="email" required value="' + esc(l.correo || '') + '"></div>' +
+      '<div><label for="lc-tel">Teléfono (opcional)</label><input id="lc-tel" inputmode="tel" value="' + esc(l.telefono || '') + '"></div>' +
+      '<div><label for="lc-notas">Notas (opcional)</label><input id="lc-notas" value="' + esc(l.notas || '') + '"></div></div>' +
+      '<div id="aviso-correo"></div><button class="boton ancho" type="submit">Guardar</button></form></div>';
+    document.getElementById('volver').addEventListener('click', function (ev) { ev.preventDefault(); alVolver(); });
+    document.getElementById('lc-correo').addEventListener('input', function () {
+      var m = valor('lc-correo').toLowerCase().match(/@(gmail|hotmail|outlook|yahoo|live)\.co$/);
+      IT.mensaje(document.getElementById('aviso-correo'), m ? 'El correo termina en ".co". ¿Quisiste decir "@' + m[1] + '.com"?' : '', 'aviso');
+    });
+    document.getElementById('f-loc').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var boton = ev.target.querySelector('button');
+      boton.disabled = true;
+      IT.llamar('guardarLocatario', { locatario_id: l.locatario_id || null, rut: valor('lc-rut'), razon_social: valor('lc-razon'),
+        nombre_contacto: valor('lc-contacto'), correo: valor('lc-correo'), telefono: valor('lc-tel'), notas: valor('lc-notas') })
+        .then(function (r) { alGuardar(r.locatario_id, r.aviso ? 'Guardado. ' + r.aviso : null); }, fallo('m-form', boton));
+    });
+  }
+})();
+</script>

@@ -1,0 +1,225 @@
+<script>
+/* Sub-etapa 1.5: Cargos / descuentos y Pagos / abonos. Usa IT (ui/App.html). */
+(function () {
+  'use strict';
+  var IT = window.IT, esc = IT.esc, miles = IT.miles;
+  var filtro = { periodos: null, unidad: '', anulados: false }; // periodos: meses marcados en el filtro (D92)
+
+  function contenido() { return document.getElementById('contenido'); }
+  function valor(id) { var el = document.getElementById(id); return el ? el.value.trim() : ''; }
+  function enlazar(sel, ev, fn) { Array.prototype.forEach.call(document.querySelectorAll(sel), function (el) { el.addEventListener(ev, function (e) { fn(el, e); }); }); }
+  function fecha(t) { return t ? t.slice(8, 10) + '-' + t.slice(5, 7) + '-' + t.slice(0, 4) : '—'; }
+  function plata(n) { return (n < 0 ? '−$' : '$') + miles(Math.abs(n)); }
+  function cargando(suave) { IT.cargando(suave); }
+  function error(r) { IT.mensaje(document.getElementById('m-mov') || contenido(), r.error); window.scrollTo(0, 0); }
+  function nombreUnidad(d, id) { var u = d.unidades.filter(function (x) { return x.unidad_id === id; })[0]; return u ? u.nombre : id; }
+  /** Selector de período (D92). conDatos: meses con registros (los demás se ven en gris). */
+  function selectorPeriodo(d, id, valor, opciones) {
+    var estados = {};
+    d.periodos.forEach(function (p) { if (d.ultimoConfirmado && p <= d.ultimoConfirmado) estados[p] = 'confirmado'; });
+    return IT.selectorPeriodo(Object.assign({ id: id, valor: valor, permitidos: d.periodos, enCurso: d.enCurso, estados: estados }, opciones || {}));
+  }
+  function opcionesUnidad(d, elegida) {
+    return '<option value="">Elige el local…</option>' + d.unidades.map(function (u) {
+      return '<option value="' + u.unidad_id + '"' + (u.unidad_id === elegida ? ' selected' : '') + '>' + esc(u.nombre) +
+        // D98: si el contrato ya terminó, el local está vacío; se muestra a quién se asociaría el cargo
+        (!u.locatario ? ' · vacío' : u.terminado ? ' · vacío (último: ' + esc(u.locatario) + ')' : ' · ' + esc(u.locatario)) + '</option>';
+    }).join('');
+  }
+  function filtros(d, conDatos) {
+    return '<div class="filtros">' + selectorPeriodo(d, 'f-per', filtro.periodos, { multiple: true, conDatos: conDatos, etiqueta: 'Períodos' }) +
+      '<select id="f-uni"><option value="">Todos los locales</option>' + d.unidades.map(function (u) {
+        return '<option value="' + u.unidad_id + '"' + (u.unidad_id === filtro.unidad ? ' selected' : '') + '>' + esc(u.nombre) + '</option>';
+      }).join('') + '</select></div>' +
+      '<label class="casilla"><input type="checkbox" id="f-anu"' + (filtro.anulados ? ' checked' : '') + '> Ver anulados</label>';
+  }
+  function activarFiltros(repintar) {
+    document.getElementById('f-per').addEventListener('change', function (e) { filtro.periodos = e.target.value.split(','); repintar(); });
+    document.getElementById('f-uni').addEventListener('change', function (e) { filtro.unidad = e.target.value; repintar(); });
+    document.getElementById('f-anu').addEventListener('change', function (e) { filtro.anulados = e.target.checked; repintar(); });
+  }
+  function pasa(x, campoPeriodo) {
+    return filtro.periodos.indexOf(x[campoPeriodo]) !== -1 && (!filtro.unidad || x.unidad_id === filtro.unidad) && (filtro.anulados || x.estado !== 'anulado');
+  }
+
+  // ------------------------------------------------------------ Cargos / descuentos
+  IT.vistas.cargos = function (aviso) {
+    cargando(!!aviso);
+    IT.llamar('datosMovimientos', {}).then(function (d) {
+      if (!filtro._iniciado) { filtro.periodos = [d.enCurso]; filtro._iniciado = true; }
+      var pintar = function () {
+        var lista = d.movimientos.filter(function (m) { return pasa(m, 'periodo_aplica'); })
+          .sort(function (a, b) { return a.periodo_aplica === b.periodo_aplica ? (a.mov_id < b.mov_id ? 1 : -1) : (a.periodo_aplica < b.periodo_aplica ? 1 : -1); });
+        var total = lista.filter(function (m) { return m.estado !== 'anulado'; }).reduce(function (a, m) { return a + m.monto; }, 0);
+        contenido().innerHTML = '<h1>Cargos / descuentos</h1><div id="m-mov"></div>' + (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '') +
+          (IT.soloLectura() ? '' : '<div class="acciones" style="margin-bottom:.75rem"><button class="boton" id="b-nuevo">+ Nuevo cargo o descuento</button></div>') +
+          filtros(d, d.movimientos.filter(function (m) { return m.estado !== 'anulado'; }).map(function (m) { return m.periodo_aplica; })) +
+          '<p class="suave">' + lista.length + ' registros · total ' + plata(total) + '</p>' +
+          (lista.map(function (m) {
+            return '<div class="tarjeta"><div class="fila-monto"><span>' + esc(nombreUnidad(d, m.unidad_id)) + ' · ' + esc(m.glosa) + '</span>' +
+              '<strong>' + plata(m.monto) + '</strong></div>' +
+              '<div class="suave">' + esc(IT.nombrePeriodo(m.periodo_aplica)) + ' · ' + esc(m.categoria) + (m.grupo_cuotas ? ' · plan de ' + m.cuota_total + ' cuotas' : '') +
+              ' · ' + esc(m.creado_por) + ' · ' + esc(IT.fechaHora(m.creado_en)) + '</div>' +
+              (m.estado === 'anulado' ? '<div><span class="etiqueta alerta">anulado</span> <span class="suave">' + esc(m.motivo_anulacion) + '</span></div>' : '') +
+              (m.puedeAnular && !IT.soloLectura() ? '<div class="acciones"><button class="boton peligro chico" data-anular="' + m.mov_id + '">Anular</button>' +
+                (m.grupo_cuotas ? '<button class="boton peligro chico" data-anular-resto="' + m.mov_id + '">Anular esta y las siguientes cuotas</button>' : '') + '</div>' : '') +
+              '</div>';
+          }).join('') || '<p class="suave">Sin registros.</p>');
+        activarFiltros(pintar);
+        if (!IT.soloLectura()) document.getElementById('b-nuevo').addEventListener('click', function () { formCargo(d); });
+        var anular = function (id, resto) {
+          var motivo = prompt('Motivo de la anulación (queda registrado):');
+          if (!motivo) return;
+          IT.llamar('anularMovimiento', { mov_id: id, motivo: motivo, restoPlan: resto }).then(function (r) {
+            IT.vistas.cargos(r.anulados === 1 ? 'Registro anulado.' : r.anulados + ' cuotas anuladas.');
+          }, error);
+        };
+        enlazar('[data-anular]', 'click', function (b) { anular(b.getAttribute('data-anular'), false); });
+        enlazar('[data-anular-resto]', 'click', function (b) { anular(b.getAttribute('data-anular-resto'), true); });
+      };
+      pintar();
+    }, error);
+  };
+
+  function formCargo(d) {
+    contenido().innerHTML = '<a href="#" class="volver" id="volver">← Cargos / descuentos</a><h1>Nuevo cargo o descuento</h1><div id="m-mov"></div>' +
+      '<div class="tarjeta"><form id="f-cargo" autocomplete="off">' +
+      '<label for="c-uni">Local</label><select id="c-uni" required>' + opcionesUnidad(d, filtro.unidad) + '</select>' +
+      '<div id="c-contrato" class="suave"></div>' +
+      '<label>Tipo</label><div class="acciones"><label class="casilla"><input type="radio" name="c-tipo" value="cargo" checked> Cargo</label>' +
+      '<label class="casilla"><input type="radio" name="c-tipo" value="descuento"> Descuento</label></div>' +
+      '<div class="rejilla"><div><label for="c-cat">Categoría</label><select id="c-cat">' + d.categorias.map(function (c) { return '<option>' + esc(c) + '</option>'; }).join('') + '</select></div>' +
+      '<div><label for="c-monto">Monto (siempre positivo)</label><input id="c-monto" inputmode="numeric" required></div></div>' +
+      '<label for="c-glosa">Glosa (aparecerá en el estado de cuenta)</label><input id="c-glosa" required maxlength="120">' +
+      '<div class="rejilla"><div><label>Período al que aplica</label>' + selectorPeriodo(d, 'c-per', d.enCurso, { etiqueta: 'Período al que aplica' }) + '</div>' +
+      '<div><label for="c-fecha">Fecha</label><input type="date" id="c-fecha" value="' + d.hoy + '"></div></div>' +
+      '<label class="casilla"><input type="checkbox" id="c-encuotas"> En cuotas</label>' +
+      '<div id="c-cuotas" hidden><label for="c-n">Número de cuotas (una por mes desde el período elegido)</label><input id="c-n" inputmode="numeric" value="3"><div id="c-previa" class="suave"></div></div>' +
+      '<div id="c-retro" hidden><div class="mensaje aviso">Ese período ya está confirmado: solo la administradora puede registrar ahí, con motivo.</div>' +
+      '<label for="c-motivo">Motivo</label><input id="c-motivo"></div>' +
+      '<button class="boton ancho" type="submit">Guardar</button></form></div>';
+    document.getElementById('volver').addEventListener('click', function (e) { e.preventDefault(); IT.vistas.cargos(); });
+    var actualizar = function () {
+      var p = valor('c-per'), u = valor('c-uni');
+      document.getElementById('c-retro').hidden = !(d.ultimoConfirmado && p <= d.ultimoConfirmado);
+      var enCuotas = document.getElementById('c-encuotas').checked;
+      document.getElementById('c-cuotas').hidden = !enCuotas;
+      var total = Number(valor('c-monto').replace(/\./g, '')), n = Number(valor('c-n'));
+      var previa = document.getElementById('c-previa');
+      if (enCuotas && total > 0 && n >= 2 && n <= 36 && Number.isInteger(total)) {
+        var base = Math.floor(total / n), cuotas = [];
+        for (var i = 0; i < n; i++) cuotas.push(i < n - 1 ? base : total - base * (n - 1));
+        var hasta = p; for (var k = 1; k < n; k++) hasta = (+hasta.slice(5) === 12 ? (+hasta.slice(0, 4) + 1) + '-01' : hasta.slice(0, 5) + ((+hasta.slice(5) + 1) < 10 ? '0' : '') + (+hasta.slice(5) + 1));
+        previa.textContent = 'Cuotas: ' + cuotas.map(function (c) { return '$' + miles(c); }).join(' · ') + ' (' + IT.nombrePeriodo(p) + ' a ' + IT.nombrePeriodo(hasta) + ')';
+      } else previa.textContent = '';
+      var info = document.getElementById('c-contrato');
+      if (!u) { info.textContent = ''; return; }
+      IT.llamar('contratoMovimiento', { unidad_id: u, periodo_aplica: p }).then(function (r) {
+        info.innerHTML = r.aviso ? '<div class="mensaje ' + (r.contrato_id ? 'aviso' : 'error') + '">' + esc(r.aviso) + '</div>'
+          : 'Contrato ' + esc(r.contrato_id) + ' · ' + esc(r.locatario);
+      }, function () {});
+    };
+    ['c-uni', 'c-per', 'c-encuotas'].forEach(function (id) { document.getElementById(id).addEventListener('change', actualizar); });
+    ['c-monto', 'c-n'].forEach(function (id) { document.getElementById(id).addEventListener('input', actualizar); });
+    actualizar();
+    document.getElementById('f-cargo').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var b = e.target.querySelector('button[type=submit]');
+      b.disabled = true;
+      IT.llamar('crearMovimiento', { unidad_id: valor('c-uni'), tipo: document.querySelector('input[name=c-tipo]:checked').value,
+        categoria: valor('c-cat'), monto: valor('c-monto'), glosa: valor('c-glosa'), periodo_aplica: valor('c-per'), fecha: valor('c-fecha'),
+        cuotas: document.getElementById('c-encuotas').checked ? valor('c-n') : null, motivo: valor('c-motivo') })
+        .then(function (r) { IT.vistas.cargos(r.ids.length > 1 ? 'Plan de ' + r.ids.length + ' cuotas guardado.' : 'Guardado.'); },
+          function (r) { error(r); b.disabled = false; });
+    });
+  }
+
+  // ------------------------------------------------------------ Pagos / abonos
+  var filtroPagosIniciado = false;
+  IT.vistas.pagos = function (aviso) {
+    cargando(!!aviso);
+    IT.llamar('datosPagos', {}).then(function (d) {
+      if (!filtroPagosIniciado) { filtro.periodos = [d.enCurso]; filtroPagosIniciado = true; }
+      var mesDe = function (p) { return p.periodo_aplica || p.fecha_pago.slice(0, 7); };
+      var pintar = function () {
+        var lista = d.pagos.filter(function (p) { return filtro.periodos.indexOf(mesDe(p)) !== -1 && (!filtro.unidad || p.unidad_id === filtro.unidad) && (filtro.anulados || p.estado !== 'anulado'); })
+          .sort(function (a, b) { return a.fecha_pago === b.fecha_pago ? (a.pago_id < b.pago_id ? 1 : -1) : (a.fecha_pago < b.fecha_pago ? 1 : -1); });
+        var porRef = {};
+        d.pagos.forEach(function (p) { if (p.referencia && p.estado !== 'anulado') (porRef[p.referencia] = porRef[p.referencia] || []).push(p); });
+        contenido().innerHTML = '<h1>Pagos / abonos</h1><div id="m-mov"></div>' + (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '') +
+          (IT.soloLectura() ? '' : '<div class="acciones" style="margin-bottom:.75rem"><button class="boton" id="b-nuevo">+ Nuevo pago</button></div>') +
+          filtros(d, d.pagos.filter(function (p) { return p.estado !== 'anulado'; }).map(mesDe)) +
+          '<p class="suave">El filtro de período usa el período del pago o, si no tiene, el mes de la fecha de pago.</p>' +
+          (lista.map(function (p) {
+            var grupo = p.referencia && porRef[p.referencia] && porRef[p.referencia].length > 1 ? porRef[p.referencia] : null;
+            return '<div class="tarjeta"><div class="fila-monto"><span>' + esc(nombreUnidad(d, p.unidad_id)) + ' · ' + esc(d.locatarios[p.locatario_id] || '') + '</span>' +
+              '<strong>' + plata(p.monto) + '</strong></div>' +
+              '<div class="suave">' + fecha(p.fecha_pago) + ' · ' + esc(p.medio) + (p.referencia ? ' · ref. ' + esc(p.referencia) : '') +
+              (p.periodo_aplica ? ' · ' + esc(IT.nombrePeriodo(p.periodo_aplica)) : '') + ' · ' + esc(p.creado_por) + '</div>' +
+              (grupo ? '<div class="suave">Misma transferencia: ' + grupo.map(function (g) { return esc(nombreUnidad(d, g.unidad_id)) + ' ' + plata(g.monto); }).join(' + ') +
+                ' = <strong>' + plata(grupo.reduce(function (a, g) { return a + g.monto; }, 0)) + '</strong></div>' : '') +
+              (p.glosa ? '<div class="suave">' + esc(p.glosa) + '</div>' : '') +
+              (p.estado === 'anulado' ? '<div><span class="etiqueta alerta">anulado</span> <span class="suave">' + esc(p.motivo_anulacion) + '</span></div>' : '') +
+              (p.puedeAnular && !IT.soloLectura() ? '<div class="acciones"><button class="boton peligro chico" data-anular="' + p.pago_id + '">Anular</button></div>' : '') + '</div>';
+          }).join('') || '<p class="suave">Sin pagos.</p>');
+        activarFiltros(pintar);
+        if (!IT.soloLectura()) document.getElementById('b-nuevo').addEventListener('click', function () { formPago(d, null); });
+        enlazar('[data-anular]', 'click', function (b) {
+          var motivo = prompt('Motivo de la anulación (queda registrado):');
+          if (!motivo) return;
+          IT.llamar('anularPago', { pago_id: b.getAttribute('data-anular'), motivo: motivo }).then(function () { IT.vistas.pagos('Pago anulado.'); }, error);
+        });
+      };
+      pintar();
+    }, error);
+  };
+
+  /** previo: {fecha_pago, medio, referencia, periodo_aplica} para "Guardar y otro local con la misma transferencia". */
+  function formPago(d, previo, aviso) {
+    previo = previo || {};
+    // D115: los locatarios ocultos no se ofrecen, salvo que sean el locatario del contrato de algún local
+    var delContrato = d.unidades.map(function (u) { return u.locatario_id; });
+    var locs = Object.keys(d.locatarios).filter(function (id) { return (d.locatariosOcultos || []).indexOf(id) === -1 || delContrato.indexOf(id) !== -1; })
+      .map(function (id) { return { id: id, nombre: d.locatarios[id] }; })
+      .sort(function (a, b) { return a.nombre.localeCompare(b.nombre, 'es'); });
+    contenido().innerHTML = '<a href="#" class="volver" id="volver">← Pagos / abonos</a><h1>Nuevo pago</h1><div id="m-mov"></div>' +
+      (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '') +
+      '<div class="tarjeta"><form id="f-pago" autocomplete="off">' +
+      '<label for="p-uni">Local</label><select id="p-uni" required>' + opcionesUnidad(d, '') + '</select>' +
+      '<label for="p-loc">Quién pagó</label><select id="p-loc"><option value="">(locatario del contrato)</option>' +
+      locs.map(function (l) { return '<option value="' + l.id + '">' + esc(l.nombre) + '</option>'; }).join('') + '</select>' +
+      '<div class="rejilla"><div><label for="p-fecha">Fecha de pago</label><input type="date" id="p-fecha" max="' + d.hoy + '" value="' + esc(previo.fecha_pago || d.hoy) + '"></div>' +
+      '<div><label for="p-monto">Monto</label><input id="p-monto" inputmode="numeric" required></div>' +
+      '<div><label for="p-medio">Medio</label><select id="p-medio">' + d.medios.map(function (m) {
+        return '<option' + (m === (previo.medio || 'Transferencia') ? ' selected' : '') + '>' + esc(m) + '</option>'; }).join('') + '</select></div>' +
+      '<div><label for="p-ref">Referencia (N° de operación)</label><input id="p-ref" value="' + esc(previo.referencia || '') + '"></div>' +
+      '<div><label>Período (opcional)</label>' + selectorPeriodo(d, 'p-per', previo.periodo_aplica || '', { vacio: true, etiqueta: 'Período (opcional)' }) + '</div>' +
+      '<div><label for="p-glosa">Glosa (opcional)</label><input id="p-glosa"></div></div>' +
+      '<div class="acciones"><button class="boton" type="submit" data-modo="uno">Guardar</button>' +
+      '<button class="boton secundario" type="submit" data-modo="otro">Guardar y otro local con la misma transferencia</button></div></form></div>';
+    document.getElementById('volver').addEventListener('click', function (e) { e.preventDefault(); IT.vistas.pagos(); });
+    document.getElementById('p-uni').addEventListener('change', function (e) {
+      var u = d.unidades.filter(function (x) { return x.unidad_id === e.target.value; })[0];
+      document.getElementById('p-loc').value = u && u.locatario_id ? u.locatario_id : '';
+    });
+    var modo = 'uno';
+    enlazar('#f-pago button[type=submit]', 'click', function (b) { modo = b.getAttribute('data-modo'); });
+    var enviar = function (confirmarDuplicado) {
+      var datos = { unidad_id: valor('p-uni'), locatario_id: valor('p-loc'), fecha_pago: valor('p-fecha'), monto: valor('p-monto'),
+        medio: valor('p-medio'), referencia: valor('p-ref'), periodo_aplica: valor('p-per'), glosa: valor('p-glosa'), confirmarDuplicado: confirmarDuplicado };
+      if (!datos.unidad_id) { error({ error: 'Elige el local.' }); return; }
+      IT.llamar('crearPago', datos).then(function () {
+        if (modo === 'otro') return IT.llamar('datosPagos', {}).then(function (d2) {
+          formPago(d2, { fecha_pago: datos.fecha_pago, medio: datos.medio, referencia: datos.referencia, periodo_aplica: datos.periodo_aplica },
+            'Pago guardado. Ingresa el siguiente local de la misma transferencia.');
+        });
+        IT.vistas.pagos('Pago guardado.');
+      }, function (r) {
+        if (r.codigo === 'POSIBLE_DUPLICADO') { if (confirm(r.error + '\n\nAceptar = sí, es otro pago; guardar igual.')) enviar(true); return; }
+        error(r);
+      });
+    };
+    document.getElementById('f-pago').addEventListener('submit', function (e) { e.preventDefault(); enviar(false); });
+  }
+})();
+</script>

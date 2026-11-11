@@ -1,0 +1,17 @@
+# Configuración local de clasp (ids del proyecto y credenciales)
+.clasp.json
+.clasp.*.json
+!.clasp.example.json
+.clasprc.json
+
+# Datos reales: nunca se versionan
+*.xlsx
+carga/
+src/Carga*Datos.js
+
+# Página local de prueba
+prueba_ui/
+
+node_modules/
+__pycache__/
+.DS_Store

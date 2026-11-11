@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="es"<? if (prueba) { ?> class="prueba"<? } ?>>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= incluir_('ui/Estilos'); ?>
+</head>
+<body>
+  <? if (prueba) { ?><div class="franja-prueba">AMBIENTE DE PRUEBA<span class="franja-extra"> · los cambios no tocan la base real</span></div><? } ?>
+  <div id="app"><p class="cargando">Cargando…</p></div>
+  <?!= incluir_('ui/App'); ?>
+  <?!= incluir_('ui/Maestros'); ?>
+  <?!= incluir_('ui/Cierre'); ?>
+  <?!= incluir_('ui/Movimientos'); ?>
+  <?!= incluir_('ui/Actividad'); ?>
+  <?!= incluir_('ui/Ayuda'); ?>
+  <script>IT.arrancar();</script>
+</body>
+</html>

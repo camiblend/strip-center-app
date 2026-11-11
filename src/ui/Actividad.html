@@ -1,0 +1,49 @@
+<script>
+/* Sub-etapa 1.6: vista de actividad (administradora). Usa IT (ui/App.html). */
+(function () {
+  'use strict';
+  var IT = window.IT, esc = IT.esc;
+  var f = { desde: '', hasta: '', persona: '', origen: '', hoja: '' };
+  var ORIGENES = { app: 'App', edicion_manual: 'Edición manual', sistema: 'Revisión diaria', carga: 'Carga / editor' };
+
+  function valor(id) { var el = document.getElementById(id); return el ? el.value : ''; }
+
+  function entrada(l, destacada) {
+    var cambios = l.cambios.map(function (c) {
+      return '<div class="suave">' + esc(c.campo) + ': ' + (c.antes !== '' ? esc(c.antes.slice(0, 200)) + ' → ' : '') + esc(c.despues.slice(0, 300)) + '</div>';
+    }).join('');
+    return '<div class="tarjeta"' + (destacada ? ' style="border-color:var(--peligro)"' : '') + '>' +
+      '<div class="titulo-fila"><span>' + esc(IT.fechaHora(l.timestamp)) + '</span> <strong>' + esc(l.persona) + '</strong>' +
+      ' <span class="etiqueta' + (l.origen === 'edicion_manual' ? ' pronto' : '') + '">' + esc(ORIGENES[l.origen] || l.origen) + '</span>' +
+      ' <span>' + esc(String(l.accion).replace(/_/g, ' ')) + '</span></div>' +
+      (l.hoja || l.registro ? '<div class="suave">' + esc(l.hoja) + (l.registro ? ' · ' + esc(String(l.registro).slice(0, 120)) : '') + '</div>' : '') +
+      cambios + (l.motivo ? '<div class="suave">' + esc(l.motivo) + '</div>' : '') + '</div>';
+  }
+
+  IT.vistas.actividad = function () {
+    IT.marco('<p class="cargando">Cargando…</p>');
+    IT.llamar('actividad', f).then(function (d) {
+      f.desde = d.desde; f.hasta = d.hasta;
+      var opciones = function (lista, elegido, todos) {
+        return '<option value="">' + todos + '</option>' + lista.map(function (o) {
+          return '<option value="' + esc(o.id) + '"' + (o.id === elegido ? ' selected' : '') + '>' + esc(o.nombre) + '</option>';
+        }).join('');
+      };
+      document.getElementById('contenido').innerHTML = '<h1>Actividad</h1>' +
+        (d.alertas.length ? '<h2>Alertas de los últimos 30 días (' + d.alertas.length + ')</h2>' + d.alertas.map(function (l) { return entrada(l, true); }).join('') : '') +
+        '<div class="rejilla"><div><label for="a-desde">Desde</label><input type="date" id="a-desde" value="' + d.desde + '"></div>' +
+        '<div><label for="a-hasta">Hasta</label><input type="date" id="a-hasta" value="' + d.hasta + '"></div>' +
+        '<div><label for="a-persona">Persona</label><select id="a-persona">' + opciones(d.personas, f.persona, 'Todas') + '</select></div>' +
+        '<div><label for="a-origen">Origen</label><select id="a-origen">' + opciones(Object.keys(ORIGENES).map(function (k) { return { id: k, nombre: ORIGENES[k] }; }), f.origen, 'Todos') + '</select></div>' +
+        '<div><label for="a-hoja">Hoja</label><select id="a-hoja">' + opciones(d.hojas.map(function (h) { return { id: h, nombre: h }; }), f.hoja, 'Todas') + '</select></div></div>' +
+        '<div class="acciones" style="margin-bottom:.75rem"><button class="boton secundario" id="a-filtrar">Filtrar</button></div>' +
+        '<p class="suave">' + d.total + ' entradas' + (d.recortado ? ' (se muestran las 500 más recientes)' : '') + '.</p>' +
+        (d.filas.map(function (l) { return entrada(l, false); }).join('') || '<p class="suave">Sin actividad en ese rango.</p>');
+      document.getElementById('a-filtrar').addEventListener('click', function () {
+        f = { desde: valor('a-desde'), hasta: valor('a-hasta'), persona: valor('a-persona'), origen: valor('a-origen'), hoja: valor('a-hoja') };
+        IT.vistas.actividad();
+      });
+    }, function (r) { IT.mensaje(document.getElementById('contenido'), r.error); });
+  };
+})();
+</script>

@@ -1,0 +1,9 @@
+{
+  "name": "strip-center-app",
+  "private": true,
+  "description": "App de ingreso de datos del strip center (Google Apps Script)",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "push": "clasp push"
+  }
+}

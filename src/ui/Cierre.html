@@ -1,0 +1,735 @@
+<script>
+/* Sub-etapa 1.4: cierre mensual (boletas, lecturas, gastos comunes, resumen, confirmar). Usa IT (ui/App.html). */
+(function () {
+  'use strict';
+  var IT = window.IT, esc = IT.esc, miles = IT.miles;
+  var periodo = null;           // período elegido (null = en curso)
+  var servicio = 'luz', soloEsperadas = true, siguienteFoco = null;
+  // D82: período, servicio y filtro se recuerdan en la pestaña, para que al recargar quede todo como estaba
+  (function () {
+    try {
+      var g = JSON.parse(sessionStorage.getItem('it_cierre') || 'null');
+      if (g) { periodo = g.periodo || null; servicio = g.servicio || 'luz'; soloEsperadas = g.soloEsperadas !== false; }
+    } catch (e) { /* sin memoria de pestaña: valores por defecto */ }
+  })();
+  function recordarSeleccion() {
+    try { sessionStorage.setItem('it_cierre', JSON.stringify({ periodo: periodo, servicio: servicio, soloEsperadas: soloEsperadas })); } catch (e) {}
+  }
+
+  function contenido() { return document.getElementById('contenido'); }
+  function valor(id) { var el = document.getElementById(id); return el ? el.value.trim() : ''; }
+  function enlazar(sel, ev, fn) { Array.prototype.forEach.call(document.querySelectorAll(sel), function (el) { el.addEventListener(ev, function (e) { fn(el, e); }); }); }
+  function num(x, dec) {
+    if (x === null || x === undefined || x === '') return '—';
+    var f = Number(x).toFixed(dec === undefined ? 1 : dec).split('.');
+    return f[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.') + (f[1] && Number(f[1]) ? ',' + f[1].replace(/0+$/, '') : '');
+  }
+  /** D79: en vez de "divisor", una frase: "El gasto común se divide en 22 locales este período." (D94) */
+  function aplicaA(dv) {
+    var ajustado = dv.usado !== dv.calculado;
+    return '<p class="suave" style="margin:.25rem 0 0">El gasto común se divide en <strong>' + dv.usado + ' locales</strong> este período.' +
+      (ajustado ? ' <span class="etiqueta pronto">ajustado</span> Según las unidades marcadas serían ' + dv.calculado + (dv.motivo ? ' · ' + esc(dv.motivo) : '') + '.' : '') + '</p>';
+  }
+  function plata(x) { return x === null || x === undefined ? '—' : (x < 0 ? '−$' + miles(-x) : '$' + miles(x)); }
+  function fecha(t) { return t ? t.slice(8, 10) + '-' + t.slice(5, 7) + '-' + t.slice(0, 4) : '—'; }
+  function leerNumero(t) { t = String(t || '').trim(); if (/,/.test(t)) t = t.replace(/\./g, '').replace(',', '.'); return t === '' ? null : Number(t); }
+  var ESTADOS = { abierto: 'abierto (sin datos)', borrador: 'borrador', confirmado: 'confirmado', reabierto: 'reabierto' };
+
+  function cabecera(titulo, d) {
+    var enCurso = d.periodos.slice().sort().pop();
+    return '<h1>' + esc(titulo) + '</h1>' +
+      '<div class="filtros">' + IT.selectorPeriodo({ id: 'sel-periodo', valor: d.periodo, permitidos: d.periodos, enCurso: enCurso,
+        estados: d.estadosPeriodos || {}, etiqueta: 'Período' }) +
+      '<div><span class="etiqueta' + (d.estado === 'confirmado' ? ' ok' : '') + '">' + esc(ESTADOS[d.estado] || d.estado) + '</span>' +
+      (d.editable ? '' : ' <span class="suave">solo lectura</span>') + '</div></div><div id="m-cierre"></div>';
+  }
+  function activarPeriodo(recargar) {
+    document.getElementById('sel-periodo').addEventListener('change', function (e) { periodo = e.target.value; recordarSeleccion(); recargar(); });
+  }
+  function cargando(suave) { IT.cargando(suave); }
+  function error(r) { IT.mensaje(document.getElementById('m-cierre') || contenido(), r.error); window.scrollTo(0, 0); }
+
+  // ------------------------------------------------------------ Panel en Inicio
+  /** datos: el panel ya calculado (viene con 'inicio'); si falta, se pide aparte. */
+  IT.panelInicio = function (el, datos) {
+    var pedir = datos ? Promise.resolve(datos) : IT.llamar('panelCierre', {});
+    pedir.then(function (p) {
+      var fila = function (ok, texto, vista) {
+        return '<a href="#" class="fila" data-ir-cierre="' + vista + '"><div class="titulo-fila">' + (ok ? '✓ ' : '○ ') + esc(texto) + '</div></a>';
+      };
+      el.innerHTML = '<h2>Cierre de ' + esc(IT.nombrePeriodo(p.periodo)) + ' <span class="etiqueta">' + esc(ESTADOS[p.estado] || p.estado) + '</span></h2>' +
+        fila(p.boletas.luz && p.boletas.agua, 'Boletas del centro: ' + ((p.boletas.luz ? 1 : 0) + (p.boletas.agua ? 1 : 0)) + ' de 2', 'boletas') +
+        fila(p.lecturas.hechas === p.lecturas.esperadas, 'Lecturas: ' + p.lecturas.hechas + ' de ' + p.lecturas.esperadas +
+          (p.enRevision ? ' · ' + p.enRevision + ' en revisión' : ''), 'lecturas') +
+        fila(p.fijos > 0, 'Gastos comunes: ' + p.fijos + ' fijos, ' + p.extras + ' extraordinarios · se divide en ' + p.divisor.usado + ' locales' +
+          (p.divisor.usado !== p.divisor.calculado ? ' (ajustado)' : ''), 'gastos') +
+        // Listo cuando no queda nada que impida confirmar (D93)
+        fila(p.bloqueos.length === 0, 'Resumen del período' +
+          (p.bloqueos.length === 0 && p.estado !== 'confirmado' ? ' · listo para revisar' : ''), 'resumen') +
+        (p.esAdmin ? fila(p.estado === 'confirmado', p.estado === 'confirmado' ? 'Confirmado' : 'Revisar y confirmar (' + p.bloqueos.length + ' pendientes)', 'confirmar') : '');
+      enlazar('[data-ir-cierre]', 'click', function (a, e) { e.preventDefault(); periodo = p.periodo; IT.irA(a.getAttribute('data-ir-cierre')); });
+    }, function (r) { IT.mensaje(el, r.error); });
+  };
+
+  // ------------------------------------------------------------ Boletas
+  IT.vistas.boletas = function (aviso) {
+    cargando(!!aviso);
+    IT.llamar('datosBoletas', { periodo: periodo }).then(function (d) {
+      periodo = d.periodo;
+      var c = contenido();
+      c.innerHTML = cabecera('Boletas del centro', d) + (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '') +
+        ['luz', 'agua'].map(function (sv) { return tarjetaBoleta(d, sv); }).join('');
+      activarPeriodo(IT.vistas.boletas);
+      ['luz', 'agua'].forEach(function (sv) {
+        var vivo = function () {
+          var m = leerNumero(valor('b-monto-' + sv)), k = leerNumero(valor('b-cons-' + sv));
+          var el = document.getElementById('b-costo-' + sv);
+          if (el) el.textContent = m && k ? 'Costo unitario: $' + num(m / k, 4) + (sv === 'luz' ? '/kWh' : '/m³') : '';
+        };
+        enlazar('#b-monto-' + sv + ', #b-cons-' + sv, 'input', vivo);
+        enlazar('#b-guardar-' + sv, 'click', function (b) {
+          b.disabled = true;
+          IT.llamar('guardarBoleta', { periodo: d.periodo, servicio: sv, monto_total: valor('b-monto-' + sv).replace(/\./g, ''), consumo_total: valor('b-cons-' + sv) })
+            .then(function (r) { IT.vistas.boletas('Boleta de ' + sv + ' guardada.' + (r.ajusteReiniciado ? ' El ajuste de costo unitario se reinició: vuelve a ajustarlo si corresponde.' : '')); },
+              function (r) { error(r); b.disabled = false; });
+        });
+        enlazar('#b-ajustar-' + sv, 'click', function (b) {
+          b.disabled = true;
+          IT.llamar('ajustarCosto', { periodo: d.periodo, servicio: sv, costo: valor('b-usado-' + sv), motivo: valor('b-motivo-' + sv) })
+            .then(function () { IT.vistas.boletas('Costo unitario de ' + sv + ' ajustado.'); }, function (r) { error(r); b.disabled = false; });
+        });
+      });
+    }, error);
+  };
+
+  function tarjetaBoleta(d, sv) {
+    var b = d[sv], unidad = sv === 'luz' ? 'kWh' : 'm³', variacion = d[sv + 'Variacion'];
+    var html = '<div class="tarjeta"><strong>' + (sv === 'luz' ? 'Luz' : 'Agua') + '</strong>' +
+      (b ? '<dl class="datos"><dt>Monto</dt><dd>' + plata(b.monto_total) + '</dd><dt>Consumo</dt><dd>' + num(b.consumo_total) + ' ' + unidad + '</dd>' +
+        '<dt>Costo calculado</dt><dd>$' + num(b.calculado, 4) + '</dd><dt>Costo usado</dt><dd>$' + num(b.usado, 4) +
+        (b.ajustado_por ? ' <span class="etiqueta pronto">ajustado</span><div class="suave">' + esc(b.motivo_ajuste) + '</div>' : '') + '</dd></dl>' : '<p class="suave">Sin ingresar.</p>') +
+      (variacion ? '<div class="mensaje aviso">El costo unitario ' + (variacion > 0 ? 'subió' : 'bajó') + ' ' + Math.round(Math.abs(variacion) * 100) +
+        '% respecto del mes anterior ($' + num(d[sv + 'Anterior'], 4) + '). Revisa que la boleta esté bien ingresada.</div>' : '');
+    if (d.editable) {
+      html += '<div class="rejilla"><div><label for="b-monto-' + sv + '">Monto total ($)</label><input id="b-monto-' + sv + '" inputmode="numeric" value="' + (b ? b.monto_total : '') + '"></div>' +
+        '<div><label for="b-cons-' + sv + '">Consumo total (' + unidad + ')</label><input id="b-cons-' + sv + '" inputmode="decimal" value="' + (b ? b.consumo_total : '') + '"></div></div>' +
+        '<div class="suave" id="b-costo-' + sv + '"></div>' +
+        '<div class="acciones"><button class="boton" id="b-guardar-' + sv + '">' + (b ? 'Corregir boleta' : 'Guardar boleta') + '</button></div>';
+      if (b && d.esAdmin) {
+        html += '<details><summary>Ajustar costo unitario usado</summary><div class="rejilla">' +
+          '<div><label for="b-usado-' + sv + '">Costo usado ($/' + unidad + ')</label><input id="b-usado-' + sv + '" inputmode="decimal" value="' + num(b.usado, 4).replace(/\./g, '') + '"></div>' +
+          '<div><label for="b-motivo-' + sv + '">Motivo</label><input id="b-motivo-' + sv + '" placeholder="ej. cambio legal de tarifa"></div></div>' +
+          '<div class="acciones"><button class="boton secundario" id="b-ajustar-' + sv + '">Guardar ajuste</button></div></details>';
+      }
+    }
+    return html + '</div>';
+  }
+
+  // ------------------------------------------------------------ Lecturas
+  IT.vistas.lecturas = function (aviso, extra) {
+    // D96: desde Confirmar se llega directo a la tarjeta en revisión
+    if (extra && extra.medidor) { servicio = extra.servicio || servicio; siguienteFoco = extra.medidor; }
+    cargando(!!aviso);
+    IT.llamar('datosLecturas', { periodo: periodo }).then(function (d) { periodo = d.periodo; pintarLecturas(d, aviso); }, error);
+  };
+
+  function pintarLecturas(d, aviso) {
+    var lista = d.fichas.filter(function (f) { return f.servicio === servicio && (!soloEsperadas || f.esperada); });
+    contenido().innerHTML = cabecera('Lecturas', d) + (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '') +
+      '<div class="filtros"><select id="l-serv"><option value="luz">Luz</option><option value="agua">Agua</option></select>' +
+      '<select id="l-filtro"><option value="1">' + textoOcupados(d) + '</option><option value="0">Todos los locales (' + d.fichas.filter(function (f) { return f.servicio === servicio; }).length + ')</option></select></div>' +
+      lista.map(function (f) { return tarjetaLectura(f, d); }).join('');
+    document.getElementById('l-serv').value = servicio;
+    document.getElementById('l-filtro').value = soloEsperadas ? '1' : '0';
+    activarPeriodo(function () { IT.vistas.lecturas(); });
+    document.getElementById('l-serv').addEventListener('change', function (e) { servicio = e.target.value; recordarSeleccion(); pintarLecturas(d); });
+    document.getElementById('l-filtro').addEventListener('change', function (e) { soloEsperadas = e.target.value === '1'; recordarSeleccion(); pintarLecturas(d); });
+    enlazarTarjetas(d, contenido());
+    if (siguienteFoco) { enfocarTarjeta(siguienteFoco); siguienteFoco = null; }
+  }
+
+  function textoOcupados(d) {
+    var esperadas = d.fichas.filter(function (f) { return f.servicio === servicio && f.esperada; });
+    return 'Locales ocupados (' + esperadas.filter(function (f) { return f.actual; }).length + ' de ' + esperadas.length + ')';
+  }
+
+  /** Enlaza los botones e inputs de las tarjetas dentro de `raiz` (toda la lista o una sola tarjeta). */
+  function enlazarTarjetas(d, raiz) {
+    var enlazar = function (sel, ev, fn) {
+      Array.prototype.forEach.call(raiz.querySelectorAll(sel), function (el) { el.addEventListener(ev, function (e) { fn(el, e); }); });
+    };
+    enlazar('[data-lectura]', 'input', function (el) {
+      var f = buscarFicha(d, el.getAttribute('data-lectura')), v = leerNumero(el.value);
+      var out = document.getElementById('cons-' + f.medidor_id);
+      if (!out) return;
+      if (v === null || !f.anterior || f.cambio) { out.innerHTML = ''; return; }
+      var c = v - f.anterior.valor;
+      out.innerHTML = 'Consumo: ' + num(c) + (servicio === 'luz' ? ' kWh' : ' m³') +
+        (fueraDeRango(c, f.promedio, d.rango) ? '<div class="mensaje aviso">⚠ El consumo está fuera del rango habitual (promedio ' + num(f.promedio) +
+          '). Revisa el medidor; si está bien, puedes guardar igual y comentar si quieres.</div>' : '');
+    });
+    enlazar('[data-guardar]', 'click', function (b) { guardarLectura(d, b.getAttribute('data-guardar'), 'normal'); });
+    enlazar('[data-traspaso]', 'click', function (b) { guardarTraspaso(d, b); });
+    enlazar('[data-anular-lectura]', 'click', function (b) {
+      var motivo = prompt('Motivo para anular esta lectura (ej. se ingresó en el medidor equivocado):');
+      if (!motivo) return;
+      IT.llamar('anularLectura', { lectura_id: b.getAttribute('data-anular-lectura'), motivo: motivo }).then(function () { IT.vistas.lecturas('Lectura anulada.'); }, error);
+    });
+    enlazar('[data-resolver]', 'click', function (b) { resolver(d, b.getAttribute('data-resolver'), b.getAttribute('data-modo')); });
+  }
+
+  /**
+   * Desliza rápido y suave (0,25 s) para que la tarjeta quede a `alto` px del borde de arriba: al guardar,
+   * donde estaba la tarjeta recién guardada, así la vista no se mueve (D87). Nunca queda bajo la barra fija.
+   */
+  function enfocarTarjeta(id, alto) {
+    var el = document.getElementById('tl-' + id);
+    if (!el) return;
+    var barra = document.querySelector('.barra'), minimo = (barra ? barra.offsetHeight : 0) + 8;
+    var desde = window.scrollY, hasta = Math.max(0, desde + el.getBoundingClientRect().top - Math.max(alto || 0, minimo));
+    var inicio = null;
+    var paso = function (t) {
+      if (inicio === null) inicio = t;
+      var k = Math.min(1, (t - inicio) / 250);
+      window.scrollTo(0, desde + (hasta - desde) * (1 - Math.pow(1 - k, 3)));
+      if (k < 1) requestAnimationFrame(paso);
+    };
+    if (Math.abs(hasta - desde) > 2) requestAnimationFrame(paso);
+    var inp = document.getElementById('in-' + id);
+    if (inp) { try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); } }
+  }
+
+  function buscarFicha(d, id) { for (var i = 0; i < d.fichas.length; i++) if (d.fichas[i].medidor_id === id) return d.fichas[i]; return null; }
+
+  /** Misma regla que alertasRango (Calculos.js), para avisar mientras se escribe. */
+  function fueraDeRango(consumo, promedio, r) {
+    if (promedio === null || promedio === undefined || !r || consumo < 0) return false;
+    var minimo = servicio === 'luz' ? r.minKwh : r.minM3;
+    if (Math.abs(consumo - promedio) < minimo) return false;
+    return consumo > promedio * r.alto || consumo < promedio * r.bajo;
+  }
+
+  function tarjetaLectura(f, d) {
+    var u = servicio === 'luz' ? 'kWh' : 'm³', a = f.actual, id = f.medidor_id;
+    var etiquetas = (a ? (a.revision === 'en_revision' ? '<span class="etiqueta alerta">en revisión</span>' : '<span class="etiqueta ok">guardada</span>') :
+      (f.esperada ? '<span class="etiqueta pronto">falta</span>' : '')) +
+      (a && a.alertas ? ' <span class="etiqueta alerta">' + esc(a.alertas.replace(/_/g, ' ').toLowerCase()) + '</span>' : '') +
+      (a && a.esCambio ? ' <span class="etiqueta">medidor nuevo</span>' : '') + (a && a.revision === 'base' ? ' <span class="etiqueta">base (consumo 0)</span>' : '');
+    // Objetada = en revisión, todavía requiere una acción: contorno verde flúor (D74)
+    // Guardada: fondo gris más claro (D75)
+    var clases = 'tarjeta' + (a ? ' guardada' : '') + (a && a.revision === 'en_revision' ? ' objetada' : '');
+    var html = '<div class="' + clases + '" id="tl-' + id + '"><div class="titulo-fila"><strong>' + esc(f.unidad) + '</strong>' +
+      (f.locatario ? ' <span class="suave">' + esc(f.locatario) + '</span>' : '') + ' ' + etiquetas + '</div>' +
+      '<div class="suave">' + esc(id) + ' · Anterior: ' + (f.anterior ? num(f.anterior.valor, 3) + ' (' + esc(f.anterior.periodo ? IT.nombrePeriodo(f.anterior.periodo) : 'lectura inicial') +
+        (f.anterior.fecha ? ', ' + fecha(f.anterior.fecha) : '') + ')' : 'sin lectura anterior: esta será la base') +
+      (f.promedio !== null ? ' · promedio ' + num(f.promedio) + ' ' + u : '') + '</div>';
+    if (a) {
+      html += '<div>Actual: <strong>' + num(a.valor, 3) + '</strong> (' + fecha(a.fecha) + ') · consumo <strong>' + num(f.consumo) + ' ' + u + '</strong>' +
+        (f.cambio ? ' <span class="suave">(medidor retirado ' + num(f.cambio.final === null ? 0 : f.cambio.final - f.cambio.anteriorViejo) + ' + nuevo ' + num(a.valor - f.cambio.inicial) + ')</span>' : '') + '</div>' +
+        (a.comentario ? '<div class="suave">' + esc(a.comentario) + '</div>' : '');
+    }
+    html += seccionTraspaso(f, d);
+    if (d.editable) {
+      // Una línea: lectura > fecha (solo su ancho) > comentario (D76)
+      html += '<div class="fila-lectura"><div><label for="in-' + id + '">' + (a ? 'Corregir' : 'Lectura') + '</label><input id="in-' + id + '" data-lectura="' + id + '" inputmode="decimal" value="' + (a ? a.valor : '') + '"></div>' +
+        '<div><label for="fe-' + id + '">Fecha</label><input type="date" id="fe-' + id + '" value="' + (a ? a.fecha : d.hoy) + '"></div>' +
+        '<div class="col-comentario"><label for="co-' + id + '">Comentario</label><input id="co-' + id + '" placeholder="(opcional)" maxlength="200"></div></div>' +
+        '<div class="suave" id="cons-' + id + '"></div>' +
+        '<div id="flujo-' + id + '"></div>' +
+        '<div class="acciones"><button class="boton" data-guardar="' + id + '">Guardar y siguiente ▶</button>' +
+        (a ? '<button class="boton secundario chico" data-anular-lectura="' + a.lectura_id + '">Anular</button>' : '') + '</div>';
+      if (a && a.revision === 'en_revision' && d.esAdmin) {
+        html += '<div class="mensaje aviso">Resolver (administradora): ' +
+          '<div class="acciones"><button class="boton chico" data-resolver="' + a.lectura_id + '" data-modo="corregir_anterior">Corregir la lectura anterior</button>' +
+          '<button class="boton secundario chico" data-resolver="' + id + '" data-modo="cambio">Fue cambio de medidor</button>' +
+          '<button class="boton secundario chico" data-resolver="' + a.lectura_id + '" data-modo="base">Este mes queda como base (consumo 0)</button></div></div>';
+      }
+    }
+    return html + '</div>';
+  }
+
+  // D115: lecturas de traspaso (cambio de locatario en el mes) y reparto del consumo
+  function seccionTraspaso(f, d) {
+    var t = f.traspaso;
+    if (!t) return '';
+    var u = f.servicio === 'luz' ? 'kWh' : 'm³', id = f.medidor_id;
+    var html = '<div class="traspaso"><strong>Cambio de locatario este mes</strong>';
+    t.cortes.forEach(function (c, i) {
+      var clave = id + '|' + c.clave, sufijo = id + '-' + i;
+      html += '<div class="suave">' + esc(c.etiqueta) + (c.lectura ? ': <strong>' + num(c.lectura.valor, 3) + '</strong> (' + fecha(c.lectura.fecha) + ')' : ': falta') + '</div>';
+      if (d.editable) {
+        html += '<div class="fila-lectura"><div><label for="tr-' + sufijo + '">' + (c.lectura ? 'Corregir' : 'Lectura') + '</label>' +
+          '<input id="tr-' + sufijo + '" inputmode="decimal" value="' + (c.lectura ? c.lectura.valor : '') + '"></div>' +
+          '<div><label for="trf-' + sufijo + '">Fecha</label><input type="date" id="trf-' + sufijo + '" value="' + (c.lectura ? c.lectura.fecha : c.fecha) + '"></div>' +
+          '<div class="acciones" style="align-self:end;margin:0"><button class="boton secundario chico" data-traspaso="' + esc(clave) + '" data-sufijo="' + sufijo + '">Guardar traspaso</button>' +
+          (c.lectura ? '<button class="boton secundario chico" data-anular-lectura="' + c.lectura.lectura_id + '">Anular</button>' : '') + '</div></div>' +
+          '<div id="trm-' + sufijo + '"></div>';
+      }
+    });
+    if (t.tramos) {
+      var estimado = t.tramos.some(function (x) { return x.estimado; });
+      html += '<div>Reparto: ' + t.tramos.map(function (x) { return esc(x.locatario) + ' ' + num(x.consumo) + ' ' + u + ' (' + x.dias + ' días)'; }).join(' · ') +
+        (estimado ? ' <span class="etiqueta pronto">estimado por días</span>' : '') + '</div>';
+    }
+    return html + '</div>';
+  }
+
+  function guardarTraspaso(d, boton) {
+    var partes = boton.getAttribute('data-traspaso').split('|'), id = partes[0], sufijo = boton.getAttribute('data-sufijo');
+    var msg = document.getElementById('trm-' + sufijo);
+    var datos = { periodo: d.periodo, medidor_id: id, clave: partes[1], lectura: valor('tr-' + sufijo), fecha: valor('trf-' + sufijo) };
+    if (!datos.lectura) { IT.mensaje(msg, 'Escribe la lectura.'); return; }
+    boton.disabled = true;
+    IT.llamar('guardarLecturaTraspaso', datos).then(function (r) {
+      // Se queda en la misma tarjeta (no salta a la siguiente lectura pendiente)
+      var vieja = document.getElementById('tl-' + id);
+      if (!r || !r.ficha || !vieja) return IT.vistas.lecturas('Lectura de traspaso guardada.');
+      for (var k = 0; k < d.fichas.length; k++) if (d.fichas[k].medidor_id === id) d.fichas[k] = r.ficha;
+      var tmp = document.createElement('div');
+      tmp.innerHTML = tarjetaLectura(r.ficha, d);
+      vieja.parentNode.replaceChild(tmp.firstChild, vieja);
+      enlazarTarjetas(d, document.getElementById('tl-' + id));
+      IT.avisoFlotante('Lectura de traspaso guardada.');
+    }, function (r) { boton.disabled = false; IT.mensaje(msg, r.error); });
+  }
+
+  function guardarLectura(d, id, modo, comentario) {
+    var f = buscarFicha(d, id), flujo = document.getElementById('flujo-' + id);
+    // En revisión el motivo viene del flujo "la anterior puede estar mal" (com-); si no, del comentario opcional de la tarjeta (co-)
+    var datos = { periodo: d.periodo, medidor_id: id, lectura: valor('in-' + id), fecha: valor('fe-' + id), modo: modo,
+      comentario: comentario || (modo === 'revision' ? valor('com-' + id) : valor('co-' + id)) };
+    if (!datos.lectura) { IT.mensaje(flujo, 'Escribe la lectura.'); return; }
+    var boton = document.querySelector('[data-guardar="' + id + '"]'), textoBoton = boton && boton.textContent;
+    var soltar = function () { if (boton) { boton.disabled = false; boton.textContent = textoBoton; } };
+    if (boton) { boton.disabled = true; boton.textContent = 'Guardando…'; }
+    IT.llamar('guardarLectura', datos).then(function (r) {
+      var textos = { FUERA_RANGO: 'fuera de rango', IGUAL_A_OTRO_MEDIDOR: 'igual a otro medidor', NEGATIVO: 'en revisión' };
+      var alertas = (r && r.alertas || []).map(function (a) { return textos[a] || a; });
+      despuesDeGuardar(d, id, alertas.length ? 'Lectura guardada con alerta: ' + alertas.join(', ') + '.' : null, r && r.ficha);
+    }, function (r) {
+      soltar();
+      if (r.codigo === 'MENOR_QUE_ANTERIOR') return flujoMenor(d, f, r.error);
+      IT.mensaje(flujo, r.error);
+    });
+  }
+
+  /** D13: ¿se cambió el medidor? */
+  function flujoMenor(d, f, texto) {
+    var id = f.medidor_id, flujo = document.getElementById('flujo-' + id);
+    flujo.innerHTML = '<div class="mensaje aviso">' + esc(texto) + ' ¿Se cambió el medidor?</div>' +
+      '<div class="acciones"><button class="boton chico" id="fm-si-' + id + '">Sí, es un medidor nuevo</button>' +
+      '<button class="boton secundario chico" id="fm-no-' + id + '">No</button>' +
+      '<button class="boton secundario chico" id="fm-mal-' + id + '">La anterior puede estar mal</button></div><div id="fm-det-' + id + '"></div>';
+    var det = document.getElementById('fm-det-' + id);
+    // D96: mientras la pregunta está abierta, "Guardar y siguiente" no guarda; se esconde para no confundir
+    var guardar = document.querySelector('[data-guardar="' + id + '"]');
+    var pista = document.createElement('span');
+    pista.className = 'suave'; pista.textContent = 'Responde la pregunta de arriba para guardar.';
+    var devolver = function () {
+      if (guardar) guardar.style.display = '';
+      if (pista.parentNode) pista.parentNode.removeChild(pista);
+    };
+    if (guardar) { guardar.style.display = 'none'; guardar.parentNode.insertBefore(pista, guardar); }
+    var entrada = document.getElementById('in-' + id);
+    if (entrada) entrada.addEventListener('input', function () { devolver(); flujo.innerHTML = ''; }, { once: true });
+    document.getElementById('fm-no-' + id).addEventListener('click', function () {
+      devolver();
+      det.innerHTML = '<div class="mensaje error">Corrige la lectura: debe ser igual o mayor que ' + num(f.anterior.valor, 3) + '.</div>';
+      document.getElementById('in-' + id).focus();
+    });
+    document.getElementById('fm-mal-' + id).addEventListener('click', function () {
+      det.innerHTML = '<label for="com-' + id + '">¿Por qué crees que la anterior está mal?</label><input id="com-' + id + '">' +
+        '<p class="suave">Se guardará "en revisión" y la administradora lo resolverá antes del cierre.</p>' +
+        '<div class="acciones"><button class="boton chico" id="fm-rev-' + id + '">Guardar en revisión</button></div>';
+      document.getElementById('fm-rev-' + id).addEventListener('click', function () { guardarLectura(d, id, 'revision'); });
+    });
+    document.getElementById('fm-si-' + id).addEventListener('click', function () { formCambio(d, f, det, valor('in-' + id)); });
+  }
+
+  function formCambio(d, f, det, lectura) {
+    var id = f.medidor_id;
+    det.innerHTML = '<div class="rejilla">' +
+      '<div><label for="cm-final-' + id + '">Última lectura del medidor retirado</label><input id="cm-final-' + id + '" inputmode="decimal">' +
+      '<div class="suave">Última registrada en la app: ' + (f.anterior ? num(f.anterior.valor, 3) : '—') + '</div>' +
+      '<label class="casilla"><input type="checkbox" id="cm-nosé-' + id + '"> No la tengo</label></div>' +
+      '<div><label for="cm-ini-' + id + '">Lectura inicial del medidor nuevo</label><input id="cm-ini-' + id + '" inputmode="decimal" value="0"></div>' +
+      '<div><label for="cm-fecha-' + id + '">Fecha del cambio</label><input type="date" id="cm-fecha-' + id + '" value="' + d.hoy + '"></div>' +
+      '<div><label for="cm-lect-' + id + '">Lectura actual del medidor nuevo</label><input id="cm-lect-' + id + '" inputmode="decimal" value="' + esc(lectura || '') + '"></div></div>' +
+      '<div class="acciones"><button class="boton chico" id="cm-ok-' + id + '">Registrar cambio de medidor</button></div><div id="cm-m-' + id + '"></div>';
+    document.getElementById('cm-nosé-' + id).addEventListener('change', function (e) { document.getElementById('cm-final-' + id).disabled = e.target.checked; });
+    document.getElementById('cm-ok-' + id).addEventListener('click', function (e) {
+      e.target.disabled = true;
+      IT.llamar('registrarCambioMedidor', { periodo: d.periodo, medidor_id: id,
+        final: document.getElementById('cm-nosé-' + id).checked ? '' : valor('cm-final-' + id), inicial: valor('cm-ini-' + id),
+        fecha_cambio: valor('cm-fecha-' + id), lectura: valor('cm-lect-' + id), fecha: valor('fe-' + id) })
+        .then(function () { despuesDeGuardar(d, id, 'Cambio de medidor registrado.'); },
+          function (r) { IT.mensaje(document.getElementById('cm-m-' + id), r.error); e.target.disabled = false; });
+    });
+  }
+
+  function resolver(d, idRef, modo) {
+    if (modo === 'cambio') {
+      var f = buscarFicha(d, idRef);
+      return formCambio(d, f, document.getElementById('flujo-' + idRef), f.actual ? f.actual.valor : '');
+    }
+    var motivo, datos = { lectura_id: idRef, modo: modo };
+    if (modo === 'corregir_anterior') {
+      var v = prompt('Valor correcto de la lectura anterior:');
+      if (!v) return;
+      datos.valor = v;
+    }
+    // D97: parte con el comentario de quien la dejó en revisión; se acepta o se cambia
+    var previo = '';
+    d.fichas.forEach(function (f) { if (f.actual && f.actual.lectura_id === idRef) previo = f.actual.comentario || ''; });
+    motivo = prompt('Motivo (queda registrado):', previo);
+    if (!motivo) return;
+    datos.motivo = motivo;
+    IT.llamar('resolverRevision', datos).then(function () { IT.vistas.lecturas('Revisión resuelta.'); }, error);
+  }
+
+  /** Con `ficha` (respuesta del servidor) se actualiza solo esa tarjeta, sin volver a pedir la lista. */
+  function despuesDeGuardar(d, id, aviso, ficha) {
+    if (ficha) {
+      for (var k = 0; k < d.fichas.length; k++) if (d.fichas[k].medidor_id === id) d.fichas[k] = ficha;
+    }
+    var orden = d.fichas.filter(function (f) { return f.servicio === servicio && (!soloEsperadas || f.esperada); });
+    var i = orden.map(function (f) { return f.medidor_id; }).indexOf(id);
+    var sig = orden.slice(i + 1).filter(function (f) { return !f.actual; })[0];
+    siguienteFoco = sig ? sig.medidor_id : null;
+    var texto = aviso || 'Lectura guardada.' + (sig ? '' : ' No quedan lecturas pendientes más abajo.');
+    var vieja = document.getElementById('tl-' + id);
+    if (!ficha || !vieja) return IT.vistas.lecturas(texto);
+    // Solo cambia la tarjeta guardada y el contador; el resto de la lista no se toca (D86)
+    var altoPrevio = vieja.getBoundingClientRect().top;
+    var tmp = document.createElement('div');
+    tmp.innerHTML = tarjetaLectura(ficha, d);
+    var nueva = tmp.firstChild;
+    vieja.parentNode.replaceChild(nueva, vieja);
+    enlazarTarjetas(d, nueva);
+    var op = document.querySelector('#l-filtro option[value="1"]');
+    if (op) op.textContent = textoOcupados(d);
+    IT.avisoFlotante(texto);
+    if (siguienteFoco) { enfocarTarjeta(siguienteFoco, altoPrevio); siguienteFoco = null; }
+  }
+
+  // ------------------------------------------------------------ Gastos comunes
+  IT.vistas.gastos = function (aviso) {
+    cargando(!!aviso);
+    IT.llamar('datosGastos', { periodo: periodo }).then(function (d) {
+      periodo = d.periodo;
+      var ed = d.editable;
+      contenido().innerHTML = cabecera('Gastos comunes', d) + (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '') +
+        '<div class="tarjeta"><strong>Gastos fijos</strong>' + d.fijos.map(function (f, i) { return filaGastoFijo(d, f, i); }).join('') +
+        (ed ? '<div class="acciones"><button class="boton" id="g-fijos" disabled>Guardar gastos fijos</button>' +
+          (d.esAdmin ? '<button class="boton secundario chico" id="g-nuevo-fijo">+ Nuevo gasto fijo</button>' : '') + '</div>' : '') + '</div>' +
+        '<div class="tarjeta" id="extras"><strong>Extraordinarios</strong>' + (d.extras.map(function (x) {
+          return '<div class="usuario-fila"><span>' + esc(x.glosa) + '</span><span>' + plata(x.monto) + '</span>' +
+            (ed ? '<button class="boton peligro chico" data-anular-gasto="' + x.gasto_id + '">Anular</button>' : '') + '</div>';
+        }).join('') || '<p class="suave">Ninguno.</p>') +
+        (ed ? '<div class="rejilla"><div><label for="gx-glosa">Glosa</label><input id="gx-glosa" placeholder="ej. Juegos inflables"></div>' +
+          '<div><label for="gx-monto">Monto ($)</label><input id="gx-monto" inputmode="numeric"></div></div>' +
+          '<div class="acciones"><button class="boton secundario" id="g-extra">Agregar extraordinario</button></div>' : '') + '</div>' +
+        '<div class="tarjeta"><strong>Total y cuota</strong><dl class="datos">' +
+        '<dt>Gastos fijos</dt><dd>' + plata(d.gc.fijos) + '</dd><dt>Extraordinarios</dt><dd>' + plata(d.gc.extras) + '</dd>' +
+        '<dt>Luz GC</dt><dd>' + (d.costo.luz === null ? 'falta la boleta de luz' : plata(d.gc.luzGC) + ' <span class="suave">(' + num(d.consumoCalles.luz) + ' kWh de las calles)</span>') + '</dd>' +
+        '<dt>Agua GC</dt><dd>' + (d.costo.agua === null ? 'falta la boleta de agua' : plata(d.gc.aguaGC) + ' <span class="suave">(' + num(d.consumoCalles.agua) + ' m³ de las calles)</span>') + '</dd>' +
+        '<dt>Total GC</dt><dd><strong>' + plata(d.gc.total) + '</strong></dd>' +
+        '<dt>Cuota GC</dt><dd><strong>' + plata(d.gc.cuota) + '</strong> por unidad</dd></dl>' + aplicaA(d.divisor) +
+        (d.gcProporcional ? '<p class="suave">Quien tuvo contrato solo parte del mes paga la cuota proporcional a sus días (ver Resumen).</p>' : '') +
+        // D94: quién paga y de quién se hace cargo la administración
+        '<details><summary>Pagan ' + d.pagan.length + ' · la administración absorbe ' + d.absorbe.length + '</summary>' +
+          '<p class="suave"><strong>Pagan:</strong> ' + esc(d.pagan.join(', ') || 'ninguno') + '</p>' +
+          '<p class="suave"><strong>Absorbe la administración</strong> (vacíos o exentos): ' + esc(d.absorbe.join(', ') || 'ninguno') + '</p></details>' +
+        (d.fueraDivisor.length ? '<div class="mensaje aviso">Pagan gasto común pero no están marcados en el divisor: ' + esc(d.fueraDivisor.join(', ')) +
+          '. Revisa la unidad en Unidades y contratos.</div>' : '') +
+        (ed ? '<details><summary>Cambiar el número de locales</summary><div class="rejilla"><div><label for="gd-n">Número de locales</label><input id="gd-n" inputmode="numeric" value="' + d.divisor.usado + '"></div>' +
+          '<div><label for="gd-motivo">Motivo (obligatorio, salvo que vuelvas a ' + d.divisor.calculado + ')</label><input id="gd-motivo"></div></div>' +
+          '<div class="acciones"><button class="boton secundario" id="g-divisor">Guardar número de locales</button></div></details>' : '') + '</div>';
+      activarPeriodo(IT.vistas.gastos);
+      // D78: se escribe o se elige "Igual que…" en cada fila, y se guarda todo junto con un solo botón (una llamada)
+      var botonGuardar = document.getElementById('g-fijos');
+      var pendientes = function () {
+        return d.fijos.filter(function (f, i) { var el = document.getElementById('gf-' + i); return el && el.value.trim() !== ''; }).length;
+      };
+      var actualizarBoton = function () {
+        if (!botonGuardar) return;
+        var n = pendientes();
+        botonGuardar.disabled = n === 0;
+        botonGuardar.textContent = n ? 'Guardar gastos fijos (' + n + ')' : 'Guardar gastos fijos';
+      };
+      d.fijos.forEach(function (f, i) {
+        var input = document.getElementById('gf-' + i);
+        if (!input) return;
+        input.addEventListener('input', function () {
+          var igual = document.querySelector('[data-fijo-igual="' + i + '"]');
+          if (igual) igual.classList.toggle('elegido', input.value.replace(/\./g, '') === String(f.anterior));
+          actualizarBoton();
+        });
+        enlazar('[data-fijo-igual="' + i + '"]', 'click', function (b) {
+          input.value = String(f.anterior);
+          b.classList.add('elegido');
+          actualizarBoton();
+        });
+        enlazar('[data-fijo-baja="' + i + '"]', 'click', function (b) {
+          if (!confirm('¿Dar de baja "' + f.concepto + '"? Desde ' + IT.nombrePeriodo(d.periodo) + ' deja de cobrarse y no aparecerá en los meses siguientes.' +
+            (f.monto !== null ? ' Se anulará el monto ya guardado este mes.' : '') + ' Puedes volver a activarlo con "+ Nuevo gasto fijo".')) return;
+          b.disabled = true;
+          IT.llamar('darDeBajaGastoFijo', { periodo: d.periodo, concepto: f.concepto })
+            .then(function () { IT.vistas.gastos(f.concepto + ' quedó dado de baja.'); }, function (r) { error(r); b.disabled = false; });
+        });
+      });
+      if (botonGuardar) botonGuardar.addEventListener('click', function () {
+        var montos = {};
+        d.fijos.forEach(function (f, i) {
+          var el = document.getElementById('gf-' + i);
+          if (el && el.value.trim() !== '') montos[f.concepto] = el.value.trim().replace(/\./g, '');
+        });
+        botonGuardar.disabled = true;
+        botonGuardar.textContent = 'Guardando…';
+        IT.llamar('guardarGastosFijos', { periodo: d.periodo, montos: montos }).then(function (r) {
+          IT.vistas.gastos(r.guardados ? 'Gastos fijos guardados (' + r.guardados + ').' : 'No había cambios: los montos ya estaban guardados.');
+        }, function (r) { error(r); actualizarBoton(); });
+      });
+      var bn = document.getElementById('g-nuevo-fijo');
+      if (bn) bn.addEventListener('click', function () {
+        var nombre = prompt('Nombre del gasto fijo (si ya existió y se dio de baja, se vuelve a activar):');
+        if (!nombre) return;
+        IT.llamar('nuevoGastoFijo', { nombre: nombre }).then(function (r) {
+          IT.vistas.gastos(r.concepto + (r.reactivado ? ' volvió a estar activo.' : ' se agregó como gasto fijo.'));
+        }, error);
+      });
+      var bx = document.getElementById('g-extra');
+      if (bx) bx.addEventListener('click', function () {
+        bx.disabled = true;
+        IT.llamar('agregarExtraordinario', { periodo: d.periodo, glosa: valor('gx-glosa'), monto: valor('gx-monto') })
+          .then(function () { IT.vistas.gastos('Gasto extraordinario agregado.'); }, function (r) { error(r); bx.disabled = false; });
+      });
+      var bd = document.getElementById('g-divisor');
+      if (bd) bd.addEventListener('click', function () {
+        bd.disabled = true;
+        IT.llamar('ajustarDivisor', { periodo: d.periodo, n: valor('gd-n'), motivo: valor('gd-motivo') })
+          .then(function () { IT.vistas.gastos('Número de locales guardado.'); }, function (r) { error(r); bd.disabled = false; });
+      });
+      enlazar('[data-anular-gasto]', 'click', function (el) {
+        var motivo = prompt('Motivo para anular este gasto:');
+        if (!motivo) return;
+        IT.llamar('anularGasto', { gasto_id: el.getAttribute('data-anular-gasto'), motivo: motivo }).then(function () { IT.vistas.gastos('Gasto anulado.'); }, error);
+      });
+    }, error);
+  };
+  /** Fila de gasto fijo: monto (si está guardado) · casilla · "Igual que <mes anterior>" (llena la casilla) · "Dar de baja" (D77, D78). */
+  function filaGastoFijo(d, f, i) {
+    var ed = d.editable;
+    var mesAnterior = IT.nombrePeriodo(sumarMes(d.periodo, -1)).split(' ')[0];
+    var html = '<div class="fila-gasto' + (f.monto !== null ? ' guardada' : '') + '"><div class="titulo-fila"><span>' + esc(f.concepto) + '</span>' +
+      (f.monto !== null ? ' <strong>✓ ' + plata(f.monto) + '</strong>' : (ed ? ' <span class="etiqueta pronto">falta</span>' : ' <span class="suave">—</span>')) +
+      (!f.activo ? ' <span class="etiqueta">dado de baja</span>' : '') + '</div>';
+    if (ed && f.activo) {
+      html += '<div class="acciones">' +
+        '<input id="gf-' + i + '" inputmode="numeric" placeholder="' + (f.monto !== null ? 'Cambiar monto' : 'Monto') + '" style="max-width:11rem" aria-label="' + esc(f.concepto) + '">' +
+        (f.anterior !== null && f.anterior !== f.monto ? '<button class="boton secundario chico" data-fijo-igual="' + i + '">Igual que ' + esc(mesAnterior) + ': ' + plata(f.anterior) + '</button>' : '') +
+        (d.esAdmin ? '<button class="boton peligro chico" data-fijo-baja="' + i + '">Dar de baja</button>' : '') + '</div>';
+    }
+    return html + '</div>';
+  }
+
+  function sumarMes(p, n) {
+    var t = Number(p.slice(0, 4)) * 12 + Number(p.slice(5, 7)) - 1 + n, m = t % 12 + 1;
+    return Math.floor(t / 12) + '-' + (m < 10 ? '0' : '') + m;
+  }
+
+  IT.vistas.gcextra = function (aviso) { IT.estado.vista = 'gastos'; IT.vistas.gastos(aviso); };
+
+  // 2.1: cuota de GC proporcional. Un solo contrato: los días bajo la cuota. Cambio de locatario: fila aparte, de borde a borde.
+  function detalleGC(partes) {
+    if (!partes || partes.length !== 1) return '';
+    return '<div class="suave" style="font-size:.8rem">' + partes[0].dias + ' de ' + partes[0].diasMes + ' días</div>';
+  }
+  // D115: reparto de luz y agua entre los locatarios del mes
+  function filaDetalleConsumo(servicios) {
+    if (!servicios) return '';
+    return servicios.map(function (s) {
+      var u = s.servicio === 'luz' ? 'kWh' : 'm³', est = s.partes.some(function (x) { return x.estimado; });
+      return '<tr><td colspan="8" class="suave" style="font-size:.85rem;padding-top:0">' + (s.servicio === 'luz' ? 'Luz' : 'Agua') + ' por locatario: ' +
+        s.partes.map(function (x) { return esc(x.locatario) + ' ' + num(x.consumo) + ' ' + u + ', ' + plata(x.monto); }).join(' · ') +
+        (est ? ' (estimado por días)' : '') + '</td></tr>';
+    }).join('');
+  }
+
+  function filaDetalleGC(partes) {
+    if (!partes || partes.length < 2) return '';
+    return '<tr><td colspan="8" class="suave" style="font-size:.85rem;padding-top:0">Gasto común por días: ' + partes.map(function (x) {
+      return esc(x.locatario) + ' ' + x.dias + ' de ' + x.diasMes + ' días, ' + plata(x.monto);
+    }).join(' · ') + '</td></tr>';
+  }
+
+  // ------------------------------------------------------------ Resumen del período
+  // 2.3 (D117): consolidado del mes. Arriendo en pesos, Otros (cargos − descuentos), total del local en gris junto a la
+  // unidad, locales del mismo locatario juntos (barra a la izquierda) y fila de totales.
+  IT.vistas.resumen = function () {
+    cargando();
+    IT.llamar('resumen', { periodo: periodo }).then(function (d) {
+      periodo = d.periodo;
+      var filas = d.filas.filter(function (f) { return f.consumoLuz !== null || f.consumoAgua !== null || f.pagaGC || f.total !== null; })
+        .sort(function (a, b) { return a.posicion - b.posicion; });
+      var suma = function (campo) {
+        var v = filas.map(function (f) { return f[campo]; }).filter(function (x) { return x !== null && x !== undefined; });
+        return v.length ? v.reduce(function (a, x) { return a + x; }, 0) : null;
+      };
+      var redondo = function (x) { return x === null || x === undefined ? null : Math.round(x); };
+      var totalGC = filas.reduce(function (a, f) { return a + (f.pagaGC && f.cuotaGC !== null ? Math.round(f.cuotaGC) : 0); }, 0);
+      contenido().innerHTML = cabecera('Resumen del período', d) +
+        ((d.avisosBoletas || []).length ? '<div class="mensaje">' + d.avisosBoletas.map(esc).join('<br>') + '</div>' : '') +
+        '<div class="tarjeta"><dl class="datos"><dt>Costo luz</dt><dd>' + (d.costo.luz === null ? '—' : '$' + num(d.costo.luz, 4) + '/kWh') + '</dd>' +
+        '<dt>Costo agua</dt><dd>' + (d.costo.agua === null ? '—' : '$' + num(d.costo.agua, 4) + '/m³') + '</dd>' +
+        '<dt>Luz GC</dt><dd>' + plata(d.gc.luzGC) + '</dd><dt>Agua GC</dt><dd>' + plata(d.gc.aguaGC) + '</dd>' +
+        '<dt>Fijos + extras</dt><dd>' + plata(d.gc.fijos + d.gc.extras) + '</dd><dt>Total GC</dt><dd><strong>' + plata(d.gc.total) + '</strong></dd>' +
+        '<dt>Cuota GC</dt><dd><strong>' + plata(d.gc.cuota) + '</strong></dd></dl>' + aplicaA(d.divisor) + '</div>' +
+        '<div class="tabla-scroll"><table class="tramos resumen"><thead><tr><th>Unidad</th><th class="num">Arriendo $</th><th class="num">Luz kWh</th><th class="num">Luz $</th><th class="num">Agua m³</th><th class="num">Agua $</th><th class="num">Cuota GC</th><th class="num">Otros</th></tr></thead><tbody>' +
+        filas.map(function (f) {
+          var g = f.grupo;
+          return '<tr class="' + (g ? 'grupo' : '') + '"><td><span class="unidad-res">' + esc(f.unidad) + '</span>' +
+            (f.total !== null ? ' <span class="total-local">' + plata(f.total) + '</span>' : '') +
+            (f.locatario && (!g || g.primero) ? '<div class="suave">' + esc(f.locatario) + '</div>' : '') +
+            (g && g.primero ? '<div class="grupo-total">' + g.n + ' locales · ' + plata(f.totalLocatario) + '</div>' : '') +
+            (f.esCalle ? '<div class="suave">área común (va al GC)</div>' : '') + '</td>' +
+            '<td class="num">' + plata(f.arriendo) + '</td>' +
+            '<td class="num">' + num(f.consumoLuz) + '</td><td class="num">' + plata(redondo(f.gastoLuz)) + '</td>' +
+            '<td class="num">' + num(f.consumoAgua) + '</td><td class="num">' + plata(redondo(f.gastoAgua)) + '</td><td class="num">' + (f.pagaGC ? plata(redondo(f.cuotaGC)) : '—') + detalleGC(f.detalleGC) + '</td>' +
+            '<td class="num">' + (f.otros ? plata(f.otros) : '—') + '</td></tr>' + filaDetalleGC(f.detalleGC) + filaDetalleConsumo(f.detalleConsumo);
+        }).join('') +
+        '<tr class="fila-total"><td>Total <span class="total-local">' + plata(suma('total')) + '</span></td><td class="num">' + plata(suma('arriendo')) + '</td>' +
+        '<td class="num">' + num(suma('consumoLuz')) + '</td><td class="num">' + plata(redondo(suma('gastoLuz'))) + '</td>' +
+        '<td class="num">' + num(suma('consumoAgua')) + '</td><td class="num">' + plata(redondo(suma('gastoAgua'))) + '</td>' +
+        '<td class="num">' + plata(totalGC) + '</td><td class="num">' + plata(suma('otros')) + '</td></tr>' +
+        '</tbody></table></div>';
+      activarPeriodo(IT.vistas.resumen);
+    }, error);
+  };
+
+  // ------------------------------------------------------------ Boletas a locatarios (2.3, D117)
+  var boletaAbierta = null;
+  function lineaB(texto, monto, clase) {
+    return '<tr' + (clase ? ' class="' + clase + '"' : '') + '><td>' + texto + '</td><td class="num">' + plata(monto) + '</td></tr>';
+  }
+  function seccionBoleta(s) {
+    var t = s.totales, u = { luz: 'kWh', agua: 'm³' };
+    var lect = ['agua', 'luz'].filter(function (sv) { return s[sv]; }).map(function (sv) {
+      var x = s[sv];
+      return '<tr><td>' + (sv === 'luz' ? 'Luz' : 'Agua') + '</td><td class="num">' + (x.actual === null ? '—' : num(x.actual, 2) + ' ' + u[sv]) + '</td>' +
+        '<td class="num">' + (x.anterior === null ? '—' : num(x.anterior, 2) + ' ' + u[sv]) + '</td><td class="num">' + num(x.consumo, 2) + ' ' + u[sv] +
+        (x.estimado ? ' <span class="suave">(estimado)</span>' : '') + '</td></tr>';
+    }).join('');
+    var arr = s.arriendoDetalle && s.arriendoDetalle.length === 1 ? s.arriendoDetalle[0] : null;
+    var notaArr = arr && arr.moneda === 'UF' && arr.ufValor ? ' <span class="suave">(' + num(arr.montoTramo, 2) + ' UF × $' + num(arr.ufValor, 2) + ')</span>' : '';
+    if (arr && arr.dias && arr.dias < arr.diasMes) notaArr += ' <span class="suave">(' + arr.dias + ' de ' + arr.diasMes + ' días)</span>';
+    return '<div class="tarjeta seccion-boleta"><h3>' + esc(s.nombre) + '</h3>' +
+      (lect ? '<div class="tabla-scroll"><table class="tramos"><thead><tr><th></th><th class="num">Lectura actual</th><th class="num">Lectura anterior</th><th class="num">Consumo</th></tr></thead><tbody>' + lect + '</tbody></table></div>' : '') +
+      '<table class="tramos detalle-boleta"><tbody>' +
+      '<tr class="titulo-b"><td colspan="2">Gastos locatario</td></tr>' +
+      lineaB('Arriendo' + notaArr, t.arriendo) +
+      (t.luz !== null ? lineaB('Luz', t.luz) : '') + (t.agua !== null ? lineaB('Agua', t.agua) : '') +
+      lineaB('Subtotal locatario', t.subtotalLocatario, 'subtotal') +
+      // D119: los cargos van en su propio bloque, una sola vez
+      (s.cargos.length ? '<tr class="titulo-b"><td colspan="2">Otros gastos locatario</td></tr>' +
+        s.cargos.map(function (c) { return lineaB(esc(c.glosa), c.monto); }).join('') +
+        lineaB('Subtotal otros gastos', t.otros, 'subtotal') : '') +
+      (s.gc ? '<tr class="titulo-b"><td colspan="2">Gastos comunes' + (s.gc.dias && s.gc.dias < s.gc.diasMes ? ' <span class="suave">(' + s.gc.dias + ' de ' + s.gc.diasMes + ' días)</span>' : '') + '</td></tr>' +
+        s.gc.lineas.map(function (l) { return lineaB(esc(l.concepto), l.monto); }).join('') +
+        lineaB('Subtotal GC', t.subtotalGC, 'subtotal') : '') +
+      lineaB('Total ' + esc(s.nombre), t.total, 'total-b') +
+      '</tbody></table></div>';
+  }
+  function vistaBoleta(b, d) {
+    return '<div class="tarjeta boleta-previa"><div class="boleta-id">Boleta ' + esc(b.id) + '</div>' +
+      '<div class="boleta-quien">' + esc(b.razon_social) + (b.arrendatario ? '<br>' + esc(b.arrendatario) : '') +
+      '<br>' + b.secciones.map(function (s) { return esc(s.nombre); }).join(', ') + '</div>' +
+      (b.correo ? '<div class="suave">' + esc(b.correo) + '</div>' : '<div class="suave">Sin correo</div>') +
+      '<div class="boleta-total"><span>Total a pagar</span><strong>' + plata(b.total) + '</strong></div>' +
+      '<div class="suave">Fecha de emisión: se completa al emitir</div></div>' +
+      (b.avisos.length ? '<div class="mensaje">' + b.avisos.map(esc).join('<br>') + '</div>' : '') +
+      b.secciones.map(seccionBoleta).join('');
+  }
+  IT.vistas.boletasLocatarios = function () {
+    cargando();
+    IT.llamar('boletasLocatarios', { periodo: periodo }).then(function (d) {
+      if (periodo !== d.periodo) boletaAbierta = null;
+      periodo = d.periodo;
+      var b = boletaAbierta && d.boletas.filter(function (x) { return x.id === boletaAbierta; })[0];
+      var html = cabecera('Boletas a locatarios', d) +
+        (d.avisos.length ? '<div class="mensaje">' + d.avisos.map(esc).join('<br>') + '</div>' : '');
+      if (b) {
+        html += '<div class="acciones"><button class="boton secundario chico" id="b-volver">← Todas las boletas</button></div>' + vistaBoleta(b, d);
+      } else {
+        html += '<p class="suave">Vista previa de la boleta de cada locatario. Se emiten desde "Confirmar / reabrir" con el mes confirmado.</p>' +
+          d.boletas.map(function (x) {
+            return '<a href="#" class="fila" data-boleta="' + esc(x.id) + '"><div class="titulo-fila">' + esc(x.razon_social) +
+              ' <span class="num-fila">' + plata(x.total) + '</span></div><div class="suave">' +
+              x.secciones.map(function (s) { return esc(s.nombre); }).join(', ') + (x.avisos.length ? ' · <span class="etiqueta pronto">revisar</span>' : '') + '</div></a>';
+          }).join('') +
+          '<div class="fila fila-total-b"><div class="titulo-fila">Total del mes <span class="num-fila">' +
+          plata(d.boletas.reduce(function (a, x) { return a + x.total; }, 0)) + '</span></div><div class="suave">' + d.boletas.length + ' boletas</div></div>';
+      }
+      contenido().innerHTML = html;
+      activarPeriodo(IT.vistas.boletasLocatarios);
+      enlazar('[data-boleta]', 'click', function (el, e) { e.preventDefault(); boletaAbierta = el.getAttribute('data-boleta'); IT.vistas.boletasLocatarios(); window.scrollTo(0, 0); });
+      var bv = document.getElementById('b-volver');
+      if (bv) bv.addEventListener('click', function () { boletaAbierta = null; IT.vistas.boletasLocatarios(); });
+    }, error);
+  };
+
+  // ------------------------------------------------------------ Confirmar / reabrir (administradora)
+  IT.vistas.confirmar = function (aviso) {
+    cargando(!!aviso);
+    IT.llamar('panelCierre', { periodo: periodo }).then(function (p) {
+      periodo = p.periodo;
+      var html = cabecera('Confirmar cierre', p) + (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '');
+      if (p.estado === 'confirmado') {
+        html += '<div class="tarjeta">Confirmado por ' + esc(p.confirmado ? p.confirmado.por : '') + ' el ' + esc(IT.fechaHora(p.confirmado ? p.confirmado.en : null)) + '.' +
+          '<label for="re-motivo">Motivo para reabrir</label><input id="re-motivo">' +
+          '<div class="acciones"><button class="boton peligro" id="b-reabrir">Reabrir período</button></div></div>';
+      } else if (!p.editable) {
+        html += '<p class="suave">Este período no se puede confirmar ahora.</p>';
+      } else {
+        html += '<div class="tarjeta"><strong>Revisión</strong>' + (p.bloqueos.length
+          ? '<ul>' + p.bloqueos.map(function (b) { return '<li>' + esc(b) + '</li>'; }).join('') + '</ul>' +
+            // D96: acceso directo a cada lectura en revisión
+            ((p.revisiones || []).length ? '<div class="acciones">' + p.revisiones.map(function (x) {
+              return '<button class="boton secundario chico" data-ir-revision="' + esc(x.medidor_id) + '" data-servicio="' + esc(x.servicio) + '">Ir a ' +
+                esc(x.texto.split(' (')[0]) + '</button>';
+            }).join('') + '</div>' : '')
+          : '<p>✓ Boletas, calles, revisiones y gastos comunes están completos.</p>') + '</div>' +
+          // D115: falta de lectura de traspaso = aviso, no bloquea
+          ((p.avisosTraspaso || []).length ? '<div class="tarjeta"><strong>Lecturas de traspaso</strong><ul>' + p.avisosTraspaso.map(function (x) {
+            return '<li>' + esc(x.texto) + '</li>'; }).join('') + '</ul><p class="suave">No impide confirmar. Si alguien tomó la lectura ese día, ingrésala en Lecturas.</p></div>' : '') +
+          (p.sinLectura.length ? '<div class="tarjeta"><strong>Unidades con contrato sin lectura</strong><p class="suave">Marca cada una para confirmar que su consumo de este mes es 0.</p>' +
+            p.sinLectura.map(function (u) {
+              return '<label class="casilla"><input type="checkbox" data-cero="' + esc(u.unidad_id) + '"> ' + esc(u.unidad) + (u.locatario ? ' · ' + esc(u.locatario) : '') +
+                ' <span class="suave">(falta ' + esc(u.falta.join(' y ')) + ')</span></label>';
+            }).join('') + '</div>' : '') +
+          '<div class="tarjeta"><dl class="datos"><dt>Total GC</dt><dd>' + plata(p.gc.total) + '</dd><dt>Cuota GC</dt><dd>' + plata(p.gc.cuota) + '</dd></dl>' + aplicaA(p.divisor) +
+          '<button class="boton ancho" id="b-confirmar"' + (p.bloqueos.length ? ' disabled' : '') + '>Confirmar cierre de ' + esc(IT.nombrePeriodo(p.periodo)) + '</button></div>';
+      }
+      contenido().innerHTML = html;
+      activarPeriodo(IT.vistas.confirmar);
+      Array.prototype.forEach.call(document.querySelectorAll('[data-ir-revision]'), function (b) {
+        b.addEventListener('click', function () {
+          IT.irA('lecturas', null, { medidor: b.getAttribute('data-ir-revision'), servicio: b.getAttribute('data-servicio') });
+        });
+      });
+      var bc = document.getElementById('b-confirmar');
+      if (bc) bc.addEventListener('click', function () {
+        var cero = Array.prototype.map.call(document.querySelectorAll('[data-cero]:checked'), function (x) { return x.getAttribute('data-cero'); });
+        if (!confirm('¿Confirmar el cierre de ' + IT.nombrePeriodo(p.periodo) + '? Después no se podrá modificar sin reabrirlo.')) return;
+        bc.disabled = true;
+        IT.llamar('confirmarCierre', { periodo: p.periodo, consumoCero: cero }).then(function () { periodo = null; IT.vistas.confirmar('Cierre confirmado.'); }, function (r) { error(r); bc.disabled = false; });
+      });
+      var br = document.getElementById('b-reabrir');
+      if (br) br.addEventListener('click', function () {
+        br.disabled = true;
+        IT.llamar('reabrirCierre', { periodo: p.periodo, motivo: valor('re-motivo') }).then(function () { IT.vistas.confirmar('Período reabierto.'); }, function (r) { error(r); br.disabled = false; });
+      });
+    }, error);
+  };
+})();
+</script>

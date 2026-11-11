@@ -1,0 +1,144 @@
+<script>
+/* Z1: guía corta, siempre disponible en la app. La administradora ve además su propia parte (D97). */
+(function () {
+  'use strict';
+  var IT = window.IT;
+
+  var SECCIONES = [
+    ['Ingresar y tu PIN', [
+      'Elige tu nombre y escribe tu PIN de 6 dígitos. Si es tu primer ingreso o te resetearon el PIN, la app te pedirá crear uno nuevo.',
+      'Usa siempre tu propio nombre: cada dato queda registrado a nombre de quien ingresó.',
+      'Tras 5 PIN incorrectos quedas bloqueada 15 minutos. La administradora puede desbloquearte antes.',
+      'Al terminar, toca "Salir / cambiar de persona", sobre todo si comparten el teléfono. La sesión también se cierra sola tras 30 minutos sin uso.',
+      'Para cambiar tu PIN: menú → "Cambiar mi PIN".',
+    ]],
+    ['Lecturas (recorrido)', [
+      'Menú → Lecturas. Elige Luz o Agua arriba. Por defecto se muestran los locales con contrato y las calles.',
+      'En cada tarjeta escribe la lectura que marca el medidor y la fecha (por defecto, hoy). Toca "Guardar y siguiente": la app salta al próximo medidor sin lectura.',
+      'Escribe los números sin punto de miles y con coma para los decimales: 25384,4 (no 25.384,4).',
+      'Las calles (Exterior e Interior) son obligatorias: sin ellas no se puede cerrar el mes.',
+      'Si te equivocas, escribe el número correcto en la misma tarjeta y vuelve a guardar: la lectura anterior queda anulada y registrada.',
+      'Cuando entra un arrendatario nuevo, anota la lectura el día de la entrega del local: lo consumido antes lo paga la administración, no el arrendatario nuevo.',
+    ]],
+    ['Cambio de locatario en el mes (lectura de traspaso)', [
+      'Si un local cambia de locatario o queda vacío a mitad de mes, su tarjeta en Lecturas muestra "Cambio de locatario este mes" con la lectura que falta (al salir, al entrar o de traspaso).',
+      'Anota esa lectura el día del cambio y toca "Guardar traspaso". Se puede ingresar ese mismo día o después, junto con las demás.',
+      'Con esa lectura la app reparte el consumo del mes: cada locatario paga lo suyo, y lo de los días vacíos lo absorbe la administración. El reparto se ve en la tarjeta y en el Resumen.',
+      'Si nadie tomó la lectura ese día, la app reparte el consumo por días y lo marca "estimado por días". No impide cerrar el mes.',
+    ]],
+    ['Si la app dice "menor que la anterior"', [
+      'Un medidor nunca baja. Revisa primero que leíste bien.',
+      'Aparece una pregunta amarilla: "¿Se cambió el medidor?". Mientras no la respondas, el botón "Guardar y siguiente" no aparece; elige una de las tres opciones.',
+      '"Sí, es un medidor nuevo": si cambiaron el medidor. Anota la última lectura del medidor retirado (si alguien la tiene) y la lectura inicial del nuevo (normalmente 0).',
+      '"No": corrige el número; debe ser igual o mayor que la lectura anterior.',
+      '"La anterior puede estar mal": si crees que el error fue del mes pasado. Escribe por qué y toca "Guardar en revisión"; la administradora lo revisará.',
+    ]],
+    ['Avisos y comentarios', [
+      'Si el consumo es mucho mayor o menor que lo habitual, la tarjeta muestra un aviso mientras escribes. Vuelve a mirar el medidor; si está bien, guarda igual.',
+      'El comentario es opcional, pero ayuda a la administradora: por ejemplo "local nuevo" o "estuvo cerrado".',
+    ]],
+    ['Boletas del centro y gastos comunes', [
+      'Boletas del centro: escribe el monto total y el consumo total de la boleta de luz y de agua del strip center. La app calcula el costo unitario y avisa si cambió mucho respecto del mes anterior.',
+      'Gastos comunes: en cada gasto fijo escribe el monto o toca "Igual que <mes anterior>" si no cambió. Al terminar, toca "Guardar gastos fijos" una sola vez.',
+      'El gasto común se divide siempre entre los locales marcados en Unidades ("Cuenta en el divisor del gasto común"). La parte de los vacíos o de los que no pagan la absorbe la administración.',
+      'Gastos extraordinarios (ej. "Juegos inflables"): agrega la glosa y el monto.',
+    ]],
+    ['Cargos, cuotas y pagos', [
+      'Cargos / descuentos: elige el local, si es cargo o descuento, la categoría, el monto (siempre en positivo), la glosa (la verá el locatario) y el mes al que aplica.',
+      'En cuotas: marca "En cuotas", escribe el total y el número de cuotas; la app crea una por mes.',
+      'Pagos: un registro por local. Si una transferencia paga dos locales, usa "Guardar y otro local con la misma transferencia".',
+      'Puedes anular lo que ingresaste hoy (con motivo). Para anular algo de otro día, pídeselo a la administradora.',
+      'Marketing: cada mes, un cargo de categoría "Otro" y glosa "Marketing" por cada locatario que aceptó el trato, en uno solo de sus locales aunque tenga varios.',
+    ]],
+    ['Si algo falla', [
+      '"Tu sesión terminó": vuelve a ingresar con tu PIN (tu nombre queda elegido); lo que ya guardaste no se pierde.',
+      'Si recargas la página, vuelves a la misma pantalla. El botón "atrás" del teléfono vuelve a la pantalla anterior.',
+      'Si un botón no responde o aparece "Ocurrió un error inesperado", espera unos segundos y reintenta. Si se repite, avisa a la administradora con una captura de pantalla.',
+      '"No se pudo conectar con el servidor": pasa sobre todo en el ícono del iPhone después de un rato. Cierra la app por completo (desliza hacia arriba) y vuelve a abrirla. Si estabas guardando algo, revisa si quedó antes de repetirlo.',
+      'Si no ves un botón que esperabas, revisa con qué usuario entraste: algunas acciones son solo de la administradora.',
+      'Nunca edites el Google Sheet directamente: todo se ingresa por la app.',
+    ]],
+  ];
+
+  // D97: lo que hace solo la administradora
+  var SECCIONES_ADMIN = [
+    ['Administradora: lecturas en revisión', [
+      'Una lectura queda "en revisión" cuando alguien marcó "La anterior puede estar mal". Mientras haya alguna, no se puede confirmar el mes.',
+      'En Confirmar cierre aparece cuál es, con un botón "Ir a…" que abre su tarjeta en Lecturas.',
+      'Opciones: "Corregir la lectura anterior" (escribes el número correcto del mes pasado), "Fue cambio de medidor" o "Este mes queda como base (consumo 0)" (no se cobra este mes y el próximo parte desde esta lectura).',
+      'El comentario de la digitadora es su sospecha; el motivo que escribes al resolver es tu decisión. Las dos quedan registradas.',
+    ]],
+    ['Administradora: gasto común', [
+      'El gasto común se divide entre las unidades marcadas con "Cuenta en el divisor del gasto común" (hoy 22). Se marca en Unidades y contratos → la unidad → Unidad.',
+      '"Paga gastos comunes" en el contrato dice si a ese local se le cobra su cuota. Si no paga (vacío o exento, como el local 11), su parte la absorbe la administración.',
+      'En Gastos comunes, "Pagan N · la administración absorbe M" muestra el detalle. El número de locales se puede cambiar a mano para un mes, con motivo.',
+      'Para dejar de usar un gasto fijo: "Dar de baja" en Gastos comunes. Para uno nuevo: "+ Nuevo gasto fijo".',
+    ]],
+    ['Administradora: contratos y fechas', [
+      'Fecha de término: el último día pagado, como en el Excel. Ejemplo: si pagó hasta el 2 de noviembre, el término es el 2 de noviembre. El siguiente locatario puede entrar desde el 3.',
+      'Desde noviembre 2026 el gasto común es proporcional: quien tuvo contrato solo parte del mes paga la cuota × sus días ÷ los días del mes. Con cambio de locatario, cada uno paga sus días (el Resumen muestra el detalle). Octubre y antes: lo pagaba completo quien tenía contrato el día 1.',
+      'Arriendo en UF: el arriendo de cada mes es el monto en UF × la UF del último día de ese mes, al peso (la boleta de noviembre usa la UF del 30-11). El local 0 sigue en pesos. El detalle del contrato muestra la cuenta.',
+      'Para cambiar el arriendo de un contrato: "Cambiar arriendo", desde qué mes rige, monto y moneda (UF o pesos). Con la UF ya no hay reajustes que cargar; el correo de aniversario sirve para revisar la renovación.',
+      'Ocultar un locatario que ya no se usa (por ejemplo uno de prueba): en su ficha, "Ocultar". Deja de aparecer para elegir en contratos y pagos, pero su historial no cambia. No se puede ocultar a quien tiene un contrato vigente o por iniciar. En Locatarios, "Mostrar ocultos" los vuelve a mostrar.',
+      'Arriendo sugerido: en Unidades y contratos → la unidad → Unidad. Al crear un contrato aparece "Sugerido para este local" y hay que tocar "Usar" para copiarlo.',
+      'La UF se toma sola de la CMF y se ve en Inicio. Si falta (la CMF no respondió), Inicio pide ingresarla a mano con motivo; también se puede corregir con "Corregir".',
+      'Un contrato terminado ya no muestra "Editar". Si hay que corregirlo, pide ayuda a soporte.',
+      'Saldos de meses anteriores: Cargos / descuentos, categoría "Deuda arrastrada".',
+    ]],
+    ['Administradora: confirmar y reabrir el mes', [
+      'Confirmar cierre muestra lo que falta. "Unidades con contrato sin lectura": marca solo las que de verdad consumieron 0 (por ejemplo el local 0, que no se lee).',
+      'Al confirmar, el mes queda fijo: divisor, consumos y totales. El mes siguiente pasa a ser el período en curso.',
+      'Si después falta algo (por ejemplo una lectura), Confirmar / reabrir → "Reabrir período" con motivo, corrige y vuelve a confirmar.',
+      'Actividad muestra quién hizo qué y cuándo.',
+    ]],
+  ];
+
+  // D91: el rol solo lectura ve una guía propia (no ingresa datos)
+  var SECCIONES_LECTURA = [
+    ['Ingresar y tu PIN', [
+      'Elige tu nombre y escribe tu PIN de 6 dígitos. En tu primer ingreso la app te pedirá crear uno propio.',
+      'Tras 5 PIN incorrectos quedas bloqueado 15 minutos. La administradora puede desbloquearte antes.',
+      'La sesión se cierra sola tras 30 minutos sin uso. Para cambiar tu PIN: menú → "Cambiar mi PIN".',
+    ]],
+    ['Qué puedes hacer', [
+      'Tu usuario es de solo lectura: puedes mirar boletas, lecturas, gastos comunes, el resumen del período, cargos, pagos, unidades, contratos y locatarios.',
+      'No puedes ingresar ni cambiar datos, por eso no ves formularios ni botones para guardar.',
+      'Elige el período arriba de cada pantalla para ver meses anteriores.',
+    ]],
+    ['Si algo falla', [
+      'Si recargas la página, vuelves a la misma pantalla. El botón "atrás" vuelve a la pantalla anterior.',
+      'Si aparece un error, espera unos segundos y reintenta. Si se repite, avisa a la administradora.',
+    ]],
+  ];
+
+  // D103: datos de soporte y créditos, visibles para todos los roles
+  var SOPORTE = {
+    nombre: 'Camila Domínguez',
+    correo: 'soporte@ejemplo.cl',
+    whatsapp: '+56 9 0000 0000',
+    whatsappEnlace: 'https://wa.me/56900000000',
+    horario: 'Lunes a viernes, de 09:00 a 18:00 hrs.',
+  };
+
+  function tarjetaSoporte_() {
+    return '<div class="tarjeta"><strong>Soporte de la app</strong>' +
+      '<p class="suave">Para errores de la app o dudas que la administradora no pueda resolver.</p>' +
+      '<dl class="datos">' +
+      '<dt>Correo</dt><dd><a href="mailto:' + SOPORTE.correo + '">' + IT.esc(SOPORTE.correo) + '</a></dd>' +
+      '<dt>WhatsApp</dt><dd><a href="' + SOPORTE.whatsappEnlace + '" target="_blank" rel="noopener">' + IT.esc(SOPORTE.whatsapp) + '</a></dd>' +
+      '<dt>Horario</dt><dd>' + IT.esc(SOPORTE.horario) + '</dd>' +
+      '</dl></div>' +
+      '<p class="suave creditos">Desarrollado por ' + IT.esc(SOPORTE.nombre) +
+      ' · programado con asistencia de Claude (IA de Anthropic).</p>';
+  }
+
+  IT.vistas.ayuda = function () {
+    var secciones = IT.soloLectura() ? SECCIONES_LECTURA
+      : SECCIONES.concat(IT.estado.rol === 'administradora' ? SECCIONES_ADMIN : []);
+    IT.marco('<h1>Ayuda</h1>' + secciones.map(function (s) {
+      return '<div class="tarjeta"><strong>' + IT.esc(s[0]) + '</strong><ul>' +
+        s[1].map(function (t) { return '<li>' + IT.esc(t) + '</li>'; }).join('') + '</ul></div>';
+    }).join('') + tarjetaSoporte_());
+  };
+})();
+</script>

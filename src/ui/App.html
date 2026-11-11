@@ -1,0 +1,653 @@
+<script>
+(function () {
+  'use strict';
+
+  // ------------------------------------------------------------ Estado y utilidades
+  var estado = { token: null, nombre: null, rol: null, debeCambiarPin: false, vista: 'inicio', menuAbierto: false };
+  var app = document.getElementById('app');
+
+  // El pase vive solo mientras la pestaña está abierta (sessionStorage). Si el navegador lo bloquea,
+  // la app sigue funcionando y solo se pierde al recargar.
+  function guardarToken(t) { try { t ? sessionStorage.setItem('it_token', t) : sessionStorage.removeItem('it_token'); } catch (e) {} }
+  function leerToken() { try { return sessionStorage.getItem('it_token'); } catch (e) { return null; } }
+  function guardarPerfil(p) { try { sessionStorage.setItem('it_perfil', JSON.stringify(p)); } catch (e) {} }
+  function leerPerfil() { try { return JSON.parse(sessionStorage.getItem('it_perfil') || 'null'); } catch (e) { return null; } }
+  // Última persona que ingresó en este equipo (D82): solo el nombre, nunca el PIN. Se olvida al "Salir".
+  function recordarUsuario(u) { try { u ? localStorage.setItem('it_ultimo_usuario', JSON.stringify(u)) : localStorage.removeItem('it_ultimo_usuario'); } catch (e) {} }
+  function usuarioRecordado() { try { return JSON.parse(localStorage.getItem('it_ultimo_usuario') || 'null'); } catch (e) { return null; } }
+
+  function esc(t) {
+    return String(t === null || t === undefined ? '' : t)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function fechaHora(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    var dd = function (n) { return (n < 10 ? '0' : '') + n; };
+    return dd(d.getDate()) + '-' + dd(d.getMonth() + 1) + ' ' + dd(d.getHours()) + ':' + dd(d.getMinutes());
+  }
+  var MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  function nombrePeriodo(p) { return p ? MESES[Number(p.slice(5, 7)) - 1] + ' ' + p.slice(0, 4) : '—'; }
+
+  // ------------------------------------------------------------ Selector de período (D92)
+  // Botón con el mes elegido que despliega ◀ año ▶ y los 12 meses. El valor vive en un <input type="hidden" id=…>
+  // (varios meses separados por coma), que avisa con 'change' e 'input': así cada pantalla lo lee como un campo más.
+  // c: {id, valor (texto o lista), multiple, vacio (se puede dejar sin mes), permitidos [AAAA-MM], enCurso,
+  //     estados {AAAA-MM: 'confirmado'|…}, conDatos [AAAA-MM] o null, etiqueta}
+  var MESES_CORTOS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+  function sumarMesPeriodo(p, n) {
+    var t = Number(p.slice(0, 4)) * 12 + Number(p.slice(5, 7)) - 1 + n, m = t % 12 + 1;
+    return Math.floor(t / 12) + '-' + (m < 10 ? '0' : '') + m;
+  }
+  function valoresSP(texto) { return texto ? String(texto).split(',') : []; }
+  function textoSP(c, elegidos) {
+    if (!elegidos.length) return 'Sin período';
+    if (elegidos.length === 1) return nombrePeriodo(elegidos[0]);
+    var e = elegidos.slice().sort(), anio = e[0].slice(0, 4);
+    if (e.every(function (p) { return p.slice(0, 4) === anio; })) {
+      return e.length + ' meses: ' + e.map(function (p) { return MESES_CORTOS[Number(p.slice(5)) - 1]; }).join(', ') + ' ' + anio;
+    }
+    return e.length + ' meses (' + nombrePeriodo(e[0]) + ' a ' + nombrePeriodo(e[e.length - 1]) + ')';
+  }
+  function selectorPeriodo(c) {
+    var elegidos = Array.isArray(c.valor) ? c.valor.filter(Boolean) : valoresSP(c.valor);
+    var config = { multiple: !!c.multiple, vacio: !!c.vacio, permitidos: c.permitidos || [], enCurso: c.enCurso || '',
+      estados: c.estados || {}, conDatos: c.conDatos || null };
+    return '<div class="sp" data-sp="' + esc(c.id) + '" data-config="' + esc(JSON.stringify(config)) + '">' +
+      '<input type="hidden" id="' + esc(c.id) + '" value="' + esc(elegidos.join(',')) + '">' +
+      '<button type="button" class="sp-boton" aria-haspopup="true" aria-expanded="false" aria-label="' + esc(c.etiqueta || 'Período') + '">' +
+      '<span>' + esc(textoSP(config, elegidos)) + '</span><span aria-hidden="true">▾</span></button>' +
+      '<div class="sp-panel" hidden></div></div>';
+  }
+  function pintarPanelSP(caja, anio) {
+    var c = JSON.parse(caja.getAttribute('data-config'));
+    var elegidos = valoresSP(caja.querySelector('input').value);
+    var anios = c.permitidos.map(function (p) { return Number(p.slice(0, 4)); });
+    var min = Math.min.apply(null, anios), max = Math.max.apply(null, anios);
+    anio = Math.max(min, Math.min(max, anio));
+    caja.setAttribute('data-anio', anio);
+    var meses = '';
+    for (var m = 1; m <= 12; m++) {
+      var p = anio + '-' + (m < 10 ? '0' : '') + m, ok = c.permitidos.indexOf(p) !== -1;
+      var clases = 'sp-mes' + (elegidos.indexOf(p) !== -1 ? ' sp-elegido' : '') + (p === c.enCurso ? ' sp-encurso' : '') +
+        (ok && (c.estados[p] === 'abierto' || (c.conDatos && c.conDatos.indexOf(p) === -1)) ? ' sp-sindatos' : '');
+      meses += '<button type="button" class="' + clases + '" data-sp-mes="' + p + '"' + (ok ? '' : ' disabled') +
+        ' aria-pressed="' + (elegidos.indexOf(p) !== -1) + '">' + MESES_CORTOS[m - 1] + (c.estados[p] === 'confirmado' ? ' ✓' : '') + '</button>';
+    }
+    caja.querySelector('.sp-panel').innerHTML =
+      '<div class="sp-anio"><button type="button" class="sp-flecha" data-sp-anio="-1"' + (anio <= min ? ' disabled' : '') + ' aria-label="Año anterior">◀</button>' +
+      '<strong>' + anio + '</strong><button type="button" class="sp-flecha" data-sp-anio="1"' + (anio >= max ? ' disabled' : '') + ' aria-label="Año siguiente">▶</button></div>' +
+      '<div class="sp-meses">' + meses + '</div>' +
+      (c.multiple ? '<div class="acciones"><button type="button" class="boton chico" data-sp-listo>Listo</button></div>' : '');
+  }
+  function cerrarSP(caja) {
+    if (!caja) return;
+    caja.querySelector('.sp-panel').hidden = true;
+    caja.querySelector('.sp-boton').setAttribute('aria-expanded', 'false');
+  }
+  document.addEventListener('click', function (ev) {
+    var caja = ev.target.closest ? ev.target.closest('.sp') : null;
+    Array.prototype.forEach.call(document.querySelectorAll('.sp'), function (otra) { if (otra !== caja) cerrarSP(otra); });
+    if (!caja) return;
+    var c = JSON.parse(caja.getAttribute('data-config')), input = caja.querySelector('input'), panel = caja.querySelector('.sp-panel');
+    var b = ev.target.closest('button');
+    if (!b) return;
+    if (b.classList.contains('sp-boton')) {
+      if (!panel.hidden) return cerrarSP(caja);
+      var elegidos = valoresSP(input.value);
+      pintarPanelSP(caja, Number((elegidos[0] || c.enCurso || c.permitidos[0]).slice(0, 4)));
+      panel.hidden = false;
+      b.setAttribute('aria-expanded', 'true');
+      return;
+    }
+    if (b.hasAttribute('data-sp-anio')) return pintarPanelSP(caja, Number(caja.getAttribute('data-anio')) + Number(b.getAttribute('data-sp-anio')));
+    if (b.hasAttribute('data-sp-listo')) return cerrarSP(caja);
+    if (!b.hasAttribute('data-sp-mes')) return;
+    var p = b.getAttribute('data-sp-mes'), lista = valoresSP(input.value), i = lista.indexOf(p);
+    if (c.multiple) {
+      if (i !== -1 && lista.length === 1) return; // siempre queda al menos un mes
+      if (i !== -1) lista.splice(i, 1); else lista.push(p);
+      lista.sort();
+    } else if (i !== -1) {
+      if (!c.vacio) return cerrarSP(caja);
+      lista = [];
+    } else lista = [p];
+    input.value = lista.join(',');
+    caja.querySelector('.sp-boton span').textContent = textoSP(c, lista);
+    var anio = Number(caja.getAttribute('data-anio')), id = caja.getAttribute('data-sp');
+    if (c.multiple) pintarPanelSP(caja, anio); else cerrarSP(caja);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    // Si la pantalla se redibujó (filtro de una lista), el panel de selección múltiple sigue abierto en el mismo año
+    if (c.multiple && !document.body.contains(caja)) {
+      var nueva = document.querySelector('.sp[data-sp="' + id + '"]');
+      if (nueva) {
+        pintarPanelSP(nueva, anio);
+        nueva.querySelector('.sp-panel').hidden = false;
+        nueva.querySelector('.sp-boton').setAttribute('aria-expanded', 'true');
+      }
+    }
+  });
+
+  // D99: si se corta la conexión (pasa en el ícono del iPhone), las consultas se reintentan solas; lo que guarda
+  // datos no, para no duplicar un registro si el servidor alcanzó a recibirlo.
+  var SOLO_CONSULTA = ['usuariosIngreso', 'inicio', 'usuarios', 'maestros', 'previsualizarContrato', 'panelCierre', 'datosLecturas',
+    'datosBoletas', 'datosGastos', 'resumen', 'boletasLocatarios', 'datosMovimientos', 'contratoMovimiento', 'datosPagos', 'actividad'];
+  var SIN_CONEXION = 'No se pudo conectar con el servidor. Si usas la app desde el ícono del teléfono, ciérrala por completo y vuelve a abrirla.';
+
+  /** Llama al servidor. Si la sesión terminó, vuelve al ingreso con el mensaje. */
+  function llamar(accion, datos) {
+    var reintentos = SOLO_CONSULTA.indexOf(accion) !== -1 ? 2 : 0;
+    return new Promise(function (resolver, rechazar) {
+      var intentar = function (quedan) {
+        google.script.run
+          .withSuccessHandler(function (r) {
+            if (r.ok) return resolver(r.datos);
+            if (r.codigo === 'SESION_EXPIRADA' || r.codigo === 'SIN_SESION') { cerrarLocal(); mostrarIngreso(r.error); return; }
+            if (r.codigo === 'DEBE_CAMBIAR_PIN') { estado.debeCambiarPin = true; mostrarCambioPin(true); return; }
+            rechazar(r);
+          })
+          .withFailureHandler(function () {
+            if (quedan > 0) return setTimeout(function () { intentar(quedan - 1); }, 1500);
+            rechazar({ error: SIN_CONEXION + (SOLO_CONSULTA.indexOf(accion) === -1 ? ' Antes de repetir, revisa si quedó guardado.' : '') });
+          })
+          .llamar(accion, estado.token, datos || {});
+      };
+      intentar(reintentos);
+    });
+  }
+
+  function cerrarLocal() {
+    estado.token = null; estado.nombre = null; estado.rol = null;
+    guardarToken(null);
+    try { sessionStorage.removeItem('it_perfil'); sessionStorage.removeItem('it_vista'); } catch (e) {}
+  }
+
+  function mensaje(contenedor, texto, tipo) {
+    contenedor.innerHTML = texto ? '<div class="mensaje ' + (tipo || 'error') + '">' + esc(texto) + '</div>' : '';
+  }
+
+  function ocupado(boton, si, texto) {
+    boton.disabled = si;
+    if (texto) boton.textContent = texto;
+  }
+
+  // ------------------------------------------------------------ Ingreso
+  function mostrarIngreso(aviso) {
+    app.innerHTML =
+      '<div class="ingreso">' +
+      '  <div class="marca">Strip Center</div>' +
+      '  <div class="tarjeta">' +
+      '    <form id="f-ingreso" autocomplete="off">' +
+      '      <div id="i-recordado" hidden></div>' +
+      '      <div id="i-elegir"><label for="i-usuario">¿Quién eres?</label>' +
+      '      <select id="i-usuario" required><option value="">Cargando…</option></select></div>' +
+      '      <label for="i-pin">PIN</label>' +
+      '      <input id="i-pin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" required>' +
+      '      <div id="m-ingreso"></div>' +
+      '      <button class="boton ancho" type="submit">Entrar</button>' +
+      '    </form>' +
+      '  </div>' +
+      '</div>';
+    var m = document.getElementById('m-ingreso');
+    if (aviso) mensaje(m, aviso, 'aviso');
+    var sel = document.getElementById('i-usuario');
+    llamar('usuariosIngreso').then(function (lista) {
+      if (!lista.length) { sel.innerHTML = '<option value="">No hay usuarios creados</option>'; return; }
+      sel.innerHTML = '<option value="">Elige tu nombre</option>' +
+        lista.map(function (u) { return '<option value="' + esc(u.id) + '">' + esc(u.nombre) + '</option>'; }).join('');
+      // Si en este equipo ya entró alguien (y no salió a propósito), su nombre queda elegido: solo falta el PIN
+      var r = usuarioRecordado();
+      var sigue = r && lista.filter(function (u) { return u.id === r.id; })[0];
+      if (sigue) {
+        sel.value = sigue.id;
+        var caja = document.getElementById('i-recordado');
+        caja.innerHTML = '<p style="margin:.2rem 0 .4rem">Hola, <strong>' + esc(sigue.nombre) + '</strong>: ingresa tu PIN. ' +
+          '<a href="#" id="i-cambiar">¿No eres tú? Cambiar</a></p>';
+        caja.hidden = false;
+        document.getElementById('i-elegir').hidden = true;
+        document.getElementById('i-cambiar').addEventListener('click', function (ev) {
+          ev.preventDefault();
+          recordarUsuario(null);
+          sel.value = '';
+          caja.hidden = true;
+          document.getElementById('i-elegir').hidden = false;
+        });
+        document.getElementById('i-pin').focus();
+      }
+    }, function (r) { mensaje(m, r.error); });
+
+    document.getElementById('f-ingreso').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var boton = ev.target.querySelector('button');
+      var pin = document.getElementById('i-pin');
+      if (!sel.value) { mensaje(m, 'Elige tu nombre.'); return; }
+      ocupado(boton, true, 'Entrando…');
+      llamar('ingresar', { usuarioId: sel.value, pin: pin.value }).then(function (r) {
+        estado.token = r.token; estado.nombre = r.nombre; estado.rol = r.rol; estado.debeCambiarPin = r.debeCambiarPin;
+        guardarToken(r.token);
+        guardarPerfil({ nombre: r.nombre, rol: r.rol });
+        recordarUsuario({ id: sel.value, nombre: r.nombre });
+        if (r.debeCambiarPin) mostrarCambioPin(true); else irA('inicio');
+      }, function (r) {
+        pin.value = '';
+        mensaje(m, r.error);
+        ocupado(boton, false, 'Entrar');
+      });
+    });
+  }
+
+  // ------------------------------------------------------------ Cambio de PIN
+  function formularioPin(obligatorio) {
+    return '<form id="f-pin" autocomplete="off">' +
+      (obligatorio ? '<div class="mensaje aviso">Es tu primer ingreso o tu PIN fue reseteado: crea tu PIN personal de 6 dígitos.</div>' : '') +
+      '<label for="p-actual">' + (obligatorio ? 'PIN temporal' : 'PIN actual') + '</label>' +
+      '<input id="p-actual" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" required>' +
+      '<label for="p-nuevo">PIN nuevo</label>' +
+      '<input id="p-nuevo" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" required>' +
+      '<label for="p-repetir">Repite el PIN nuevo</label>' +
+      '<input id="p-repetir" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" required>' +
+      '<p class="suave">No uses todos los dígitos iguales ni secuencias como 123456.</p>' +
+      '<div id="m-pin"></div>' +
+      '<button class="boton ancho" type="submit">Guardar PIN</button>' +
+      '</form>';
+  }
+
+  function activarFormularioPin(alTerminar) {
+    document.getElementById('f-pin').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var m = document.getElementById('m-pin');
+      var actual = document.getElementById('p-actual').value;
+      var nuevo = document.getElementById('p-nuevo').value;
+      if (nuevo !== document.getElementById('p-repetir').value) { mensaje(m, 'Los PIN nuevos no coinciden.'); return; }
+      var boton = ev.target.querySelector('button');
+      ocupado(boton, true, 'Guardando…');
+      llamar('cambiarMiPin', { actual: actual, nuevo: nuevo }).then(function () {
+        estado.debeCambiarPin = false;
+        alTerminar();
+      }, function (r) { mensaje(m, r.error); ocupado(boton, false, 'Guardar PIN'); });
+    });
+  }
+
+  function mostrarCambioPin(obligatorio) {
+    if (obligatorio) {
+      app.innerHTML = '<div class="ingreso"><div class="marca">Strip Center</div>' +
+        '<div class="tarjeta"><h1>Hola, ' + esc(estado.nombre) + '</h1>' + formularioPin(true) + '</div>' +
+        '<p style="text-align:center"><button class="boton secundario chico" id="b-salir-pin">Salir</button></p></div>';
+      document.getElementById('b-salir-pin').addEventListener('click', salir);
+      activarFormularioPin(function () { irA('inicio', 'Tu PIN quedó guardado.'); });
+      return;
+    }
+    marco('<h1>Cambiar mi PIN</h1><div class="tarjeta">' + formularioPin(false) + '</div>');
+    activarFormularioPin(function () { irA('inicio', 'Tu PIN quedó guardado.'); });
+  }
+
+  // ------------------------------------------------------------ Estructura con menú (3.0b)
+  var MENU = [
+    { grupo: null, items: [{ id: 'inicio', texto: 'Inicio' }] },
+    { grupo: 'Cierre mensual', items: [
+      { id: 'boletas', texto: 'Boletas del centro' },
+      { id: 'lecturas', texto: 'Lecturas' },
+      { id: 'gastos', texto: 'Gastos comunes' },
+      { id: 'resumen', texto: 'Resumen del período' },
+      { id: 'boletasLocatarios', texto: 'Boletas a locatarios' },
+      { id: 'confirmar', texto: 'Confirmar / reabrir', admin: true }] },
+    { grupo: 'Movimientos', items: [
+      { id: 'cargos', texto: 'Cargos / descuentos' },
+      { id: 'pagos', texto: 'Pagos / abonos' }] },
+    { grupo: 'Maestros', items: [
+      { id: 'locatarios', texto: 'Locatarios' },
+      { id: 'contratos', texto: 'Unidades y contratos' }] },
+    { grupo: 'Administración', admin: true, items: [{ id: 'usuarios', texto: 'Usuarios' }, { id: 'actividad', texto: 'Actividad' }] },
+    { grupo: 'Mi cuenta', items: [{ id: 'ayuda', texto: 'Ayuda' }, { id: 'mipin', texto: 'Cambiar mi PIN' }, { id: 'salir', texto: 'Salir / cambiar de persona' }] },
+  ];
+
+  // Al volver a la misma pantalla tras guardar (con aviso), no se muestra "Cargando…": el contenido queda
+  // atenuado y en su lugar hasta que llega lo nuevo, sin perder la posición (D86).
+  function cargando(suave) {
+    var c = document.getElementById('contenido');
+    if (!suave || !c || estado.vistaPintada !== estado.vista) return marco('<p class="cargando">Cargando…</p>');
+    c.classList.add('actualizando');
+    var obs = new MutationObserver(function () {
+      obs.disconnect();
+      c.classList.remove('actualizando');
+      // Si el aviso de "guardado" quedó arriba, fuera de la vista, se muestra también flotando
+      var ok = c.querySelector(':scope > .mensaje.exito');
+      if (ok && ok.getBoundingClientRect().bottom < 60) avisoFlotante(ok.textContent);
+    });
+    obs.observe(c, { childList: true, subtree: true });
+  }
+
+  function avisoFlotante(texto) {
+    var viejo = document.getElementById('aviso-flotante');
+    if (viejo) viejo.parentNode.removeChild(viejo);
+    var el = document.createElement('div');
+    el.id = 'aviso-flotante'; el.className = 'aviso-flotante'; el.setAttribute('role', 'status'); el.textContent = texto;
+    document.body.appendChild(el);
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 4500);
+  }
+
+  // El menú se ubica justo bajo la barra de arriba, que puede variar de alto según la pantalla (D93)
+  function altoBarra() {
+    var b = document.querySelector('.barra');
+    if (b) document.documentElement.style.setProperty('--alto-barra', b.offsetHeight + 'px');
+  }
+  window.addEventListener('resize', altoBarra);
+
+  function marco(html) {
+    estado.vistaPintada = estado.vista;
+    var menu = MENU.filter(function (g) { return !g.admin || estado.rol === 'administradora'; }).map(function (g) {
+      return (g.grupo ? '<div class="grupo">' + esc(g.grupo) + '</div>' : '') + g.items.filter(function (it) {
+        return !it.admin || estado.rol === 'administradora';
+      }).map(function (it) {
+        var clases = (it.id === estado.vista ? 'activo' : '') + (it.pronto ? ' deshabilitado' : '');
+        return '<a href="#" data-vista="' + it.id + '" class="' + clases + '">' + esc(it.texto) + '</a>';
+      }).join('');
+    }).join('');
+    app.innerHTML =
+      '<header class="barra">' +
+      '  <button class="menu-btn" id="b-menu" aria-label="Menú">☰</button>' +
+      '  <span class="titulo">Strip Center</span>' +
+      '  <span class="quien">' + esc(estado.nombre) + '</span>' +
+      '</header>' +
+      '<div class="marco">' +
+      '  <nav class="lateral' + (estado.menuAbierto ? ' abierto' : '') + '" id="menu">' + menu + '</nav>' +
+      '  <main class="contenido" id="contenido">' + html + '</main>' +
+      '</div>';
+    altoBarra();
+    document.getElementById('b-menu').addEventListener('click', function () {
+      altoBarra();
+      estado.menuAbierto = !estado.menuAbierto;
+      document.getElementById('menu').classList.toggle('abierto', estado.menuAbierto);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-vista]'), function (a) {
+      a.addEventListener('click', function (ev) { ev.preventDefault(); estado.menuAbierto = false; irA(a.getAttribute('data-vista')); });
+    });
+  }
+
+  // ------------------------------------------------------------ Historial (D82)
+  // La pantalla actual queda al final de la dirección (…/exec#lecturas): al recargar se vuelve a ella y el
+  // botón "atrás" del navegador o del teléfono vuelve a la pantalla anterior en vez de salir de la app.
+  // Dentro de Google Sites la dirección de afuera no cambia, así que la pantalla también se guarda en
+  // sessionStorage y se usa cuando la dirección no trae ninguna (D84).
+  function guardarVista(v) { try { sessionStorage.setItem('it_vista', v); } catch (e) {} }
+  function vistaGuardada() { try { return sessionStorage.getItem('it_vista'); } catch (e) { return null; } }
+  function historialDisponible() {
+    return typeof google !== 'undefined' && google.script && google.script.history && google.script.url;
+  }
+  function vistaValida(v) {
+    if (!v || v === 'salir') return false;
+    if (['usuarios', 'mipin', 'actividad', 'ayuda', 'inicio'].indexOf(v) !== -1 || window.IT.vistas[v]) return true;
+    return false;
+  }
+
+  function irA(vista, aviso, extra, desdeHistorial) {
+    if (vista === 'salir') return salir();
+    if (!desdeHistorial && vista !== estado.vista && historialDisponible()) {
+      try { google.script.history.push({ vista: vista }, null, vista); } catch (e) { /* sin historial: no pasa nada */ }
+    }
+    estado.vista = vista;
+    if (vistaValida(vista)) guardarVista(vista);
+    if (window.IT.vistas[vista]) return window.IT.vistas[vista](aviso, extra);
+    if (vista === 'mipin') return mostrarCambioPin(false);
+    if (vista === 'usuarios') return mostrarUsuarios(aviso);
+    return mostrarInicio(aviso);
+  }
+
+  function salir() {
+    var token = estado.token;
+    cerrarLocal();
+    recordarUsuario(null); // salir a propósito suele significar que entrará otra persona
+    estado.vista = null;
+    if (token) google.script.run.llamar('salir', token, {});
+    mostrarIngreso();
+  }
+
+  // ------------------------------------------------------------ Inicio
+  function mostrarInicio(aviso) {
+    cargando(!!aviso);
+    llamar('inicio').then(function (d) {
+      var accesos = [['boletas', 'Boletas del centro'], ['lecturas', 'Lecturas'], ['gastos', 'Gastos comunes'],
+        ['cargos', 'Cargos / descuentos'], ['pagos', 'Pagos / abonos'], ['contratos', 'Unidades y contratos'], ['locatarios', 'Locatarios']]
+        .map(function (a) {
+          return window.IT.vistas[a[0]]
+            ? '<a href="#" class="acceso activo-acceso" data-ir="' + a[0] + '">' + esc(a[1]) + '</a>'
+            : '<div class="acceso">' + esc(a[1]) + ' <span class="etiqueta">próximamente</span></div>';
+        }).join('');
+      document.getElementById('contenido').innerHTML =
+        (aviso ? '<div class="mensaje exito">' + esc(aviso) + '</div>' : '') +
+        '<h1>Hola, ' + esc(d.nombre) + '</h1>' +
+        '<div class="tarjeta">' +
+        '  <div class="suave">Período en curso</div>' +
+        '  <div style="font-size:1.2rem;font-weight:700">' + esc(nombrePeriodo(d.periodoEnCurso)) + '</div>' +
+        '  <div class="suave">Último cierre confirmado: ' + esc(nombrePeriodo(d.ultimoCierre)) + '</div>' +
+        htmlUf(d.uf) +
+        '</div>' +
+        '<div id="panel-cierre"></div>' +
+        '<h2>Ingreso de datos</h2><div class="accesos">' + accesos + '</div>';
+      if (window.IT.panelInicio) window.IT.panelInicio(document.getElementById('panel-cierre'), d.panel);
+      activarUf(d.uf);
+      Array.prototype.forEach.call(document.querySelectorAll('[data-ir]'), function (a) {
+        a.addEventListener('click', function (ev) { ev.preventDefault(); irA(a.getAttribute('data-ir')); });
+      });
+    }, function (r) { mensaje(document.getElementById('contenido'), r.error); });
+  }
+
+  // 2.1: UF del último día del mes en curso (D106, D108). Si falta, la administradora la ingresa con motivo.
+  function htmlUf(u) {
+    if (!u) return '';
+    var fecha = u.fecha.split('-').reverse().join('-');
+    var admin = estado.rol === 'administradora';
+    var linea = u.estado === 'ok'
+      ? '<div class="suave">UF al ' + esc(fecha) + ': $' + esc(uf(u.valor)) + (u.fuente === 'manual' ? ' (ingresada a mano)' : ' (CMF)') +
+        (admin ? ' · <a href="#" id="uf-abrir">Corregir</a>' : '') + '</div>'
+      : u.estado === 'falta'
+        ? '<div class="mensaje aviso">Falta la UF del ' + esc(fecha) + ' para calcular los arriendos en UF.' +
+          (admin ? ' Ingrésala aquí:' : ' Avisa a la administradora.') + '</div>'
+        : '<div class="suave">UF al ' + esc(fecha) + ': aún no publicada (la CMF la publica el día 9)' +
+          (admin ? ' · <a href="#" id="uf-abrir">Ingresar a mano</a>' : '') + '</div>';
+    var form = admin
+      ? '<form id="uf-form" data-fecha="' + esc(u.fecha) + '"' + (u.estado === 'falta' ? '' : ' hidden') + '>' +
+        '<label for="uf-valor">UF del ' + esc(fecha) + ' (en pesos, ej. 39643,26)</label>' +
+        '<input id="uf-valor" inputmode="decimal" autocomplete="off">' +
+        '<label for="uf-motivo">Motivo</label>' +
+        '<input id="uf-motivo" autocomplete="off" placeholder="ej. la CMF no respondió">' +
+        '<div class="acciones"><button class="boton chico" type="submit">Guardar UF</button></div>' +
+        '<div id="uf-msg"></div></form>'
+      : '';
+    return linea + form;
+  }
+
+  function activarUf(u) {
+    var form = document.getElementById('uf-form');
+    if (!form) return;
+    var corregir = document.getElementById('uf-abrir');
+    if (corregir) corregir.addEventListener('click', function (ev) { ev.preventDefault(); form.hidden = !form.hidden; });
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var boton = form.querySelector('button');
+      ocupado(boton, true, 'Guardando…');
+      llamar('guardarUfManual', { fecha: form.getAttribute('data-fecha'), valor: document.getElementById('uf-valor').value,
+        motivo: document.getElementById('uf-motivo').value }).then(function () {
+        mostrarInicio('UF guardada.');
+      }, function (r) {
+        mensaje(document.getElementById('uf-msg'), r.error);
+        ocupado(boton, false, 'Guardar UF');
+      });
+    });
+  }
+
+  /** D115: buscador con ✕ para borrar lo escrito. Devuelve el HTML; activarBuscador lo conecta. */
+  function buscador(id, placeholder, valor) {
+    return '<div class="buscador"><input id="' + id + '" placeholder="' + esc(placeholder) + '" value="' + esc(valor || '') + '" autocomplete="off">' +
+      '<button type="button" class="limpiar" id="' + id + '-x" aria-label="Borrar búsqueda"' + (valor ? '' : ' hidden') + '>✕</button></div>';
+  }
+  function activarBuscador(id, alCambiar) {
+    var input = document.getElementById(id), x = document.getElementById(id + '-x');
+    input.addEventListener('input', function () { x.hidden = !input.value; alCambiar(); });
+    x.addEventListener('click', function () { input.value = ''; x.hidden = true; alCambiar(); input.focus(); });
+  }
+
+  /** 2.1: arriendo en su moneda: "16,5 UF" o "$449.592". */
+  function montoArriendo(monto, moneda) {
+    if (monto === null || monto === undefined || monto === '') return '—';
+    return moneda === 'UF' ? String(Number(monto)).replace('.', ',') + ' UF' : '$' + miles(monto);
+  }
+
+  /** UF con dos decimales y separadores chilenos: 39.643,26 */
+  function uf(n) {
+    var p = Number(n).toFixed(2).split('.');
+    return p[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + p[1];
+  }
+
+  function miles(n) {
+    if (n === null || n === undefined || n === '') return '—';
+    return String(Math.round(Number(n))).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  }
+
+  // ------------------------------------------------------------ Usuarios (administradora)
+  function mostrarUsuarios(aviso) {
+    cargando(!!aviso);
+    llamar('usuarios').then(function (lista) {
+      var c = document.getElementById('contenido');
+      c.innerHTML =
+        '<h1>Usuarios</h1><div id="m-usuarios"></div>' +
+        '<div class="tarjeta"><form id="f-nuevo" autocomplete="off">' +
+        '  <strong>Nuevo usuario</strong>' +
+        '  <label for="n-nombre">Nombre</label><input id="n-nombre" required maxlength="40">' +
+        '  <label for="n-rol">Rol</label><select id="n-rol">' + opcionesRol('digitadora') + '</select>' +
+        '  <p class="suave">Solo lectura: puede mirar la información, pero no ingresar ni cambiar nada, y no ve los correos de los locatarios.</p>' +
+        '  <div class="acciones"><button class="boton" type="submit">Crear y generar PIN temporal</button></div>' +
+        '</form></div>' +
+        lista.map(tarjetaUsuario).join('');
+      if (aviso) mensaje(document.getElementById('m-usuarios'), aviso, 'exito');
+      document.getElementById('f-nuevo').addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var boton = ev.target.querySelector('button');
+        ocupado(boton, true);
+        llamar('crearUsuario', { nombre: document.getElementById('n-nombre').value, rol: document.getElementById('n-rol').value })
+          .then(mostrarPinTemporal, function (r) { mensaje(document.getElementById('m-usuarios'), r.error); ocupado(boton, false); });
+      });
+      Array.prototype.forEach.call(c.querySelectorAll('[data-rol]'), function (sel) {
+        var antes = sel.value;
+        sel.addEventListener('change', function () {
+          var nombre = sel.getAttribute('data-nombre');
+          if (!confirm('¿Cambiar el rol de ' + nombre + ' a "' + textoRol(sel.value) + '"? Se cerrarán sus sesiones abiertas.')) { sel.value = antes; return; }
+          sel.disabled = true;
+          llamar('editarUsuario', { id: sel.getAttribute('data-id'), cambios: { rol: sel.value } })
+            .then(function () { mostrarUsuarios('Rol de ' + nombre + ' actualizado.'); },
+              function (r) { mensaje(document.getElementById('m-usuarios'), r.error); sel.value = antes; sel.disabled = false; window.scrollTo(0, 0); });
+        });
+      });
+      Array.prototype.forEach.call(c.querySelectorAll('[data-accion]'), function (b) {
+        b.addEventListener('click', function () { accionUsuario(b.getAttribute('data-accion'), b.getAttribute('data-id'), b.getAttribute('data-nombre'), b); });
+      });
+    }, function (r) { mensaje(document.getElementById('contenido'), r.error); });
+  }
+
+  var ROLES = [['digitadora', 'Digitadora'], ['administradora', 'Administradora'], ['solo_lectura', 'Solo lectura']];
+  function opcionesRol(elegido) {
+    return ROLES.map(function (r) { return '<option value="' + r[0] + '"' + (r[0] === elegido ? ' selected' : '') + '>' + r[1] + '</option>'; }).join('');
+  }
+  function textoRol(rol) { for (var i = 0; i < ROLES.length; i++) if (ROLES[i][0] === rol) return ROLES[i][1]; return rol; }
+
+  function tarjetaUsuario(u) {
+    var etiquetas = [
+      '<span class="etiqueta">' + esc(textoRol(u.rol)) + '</span>',
+      u.activo ? '' : '<span class="etiqueta alerta">inactiva</span>',
+      u.bloqueadoHasta ? '<span class="etiqueta alerta">bloqueada hasta ' + esc(fechaHora(u.bloqueadoHasta)) + '</span>' : '',
+      u.debeCambiarPin && u.activo ? '<span class="etiqueta">PIN temporal pendiente</span>' : '',
+    ].join(' ');
+    var datos = ' data-id="' + esc(u.id) + '" data-nombre="' + esc(u.nombre) + '"';
+    var esYo = u.nombre === estado.nombre;
+    return '<div class="tarjeta">' +
+      '<div class="usuario-fila"><span class="nombre">' + esc(u.nombre) + '</span>' + etiquetas + '</div>' +
+      '<div class="suave">Último ingreso: ' + esc(fechaHora(u.ultimoIngreso)) + '</div>' +
+      '<div class="acciones">' +
+      (u.bloqueadoHasta ? '<button class="boton chico" data-accion="desbloquear"' + datos + '>Desbloquear</button>' : '') +
+      (u.activo ? '<button class="boton secundario chico" data-accion="resetear"' + datos + '>Resetear PIN</button>' : '') +
+      '<button class="boton secundario chico" data-accion="renombrar"' + datos + '>Editar nombre</button>' +
+      (esYo ? '' : '<select class="chico" data-rol' + datos + ' aria-label="Rol de ' + esc(u.nombre) + '" style="width:auto">' + opcionesRol(u.rol) + '</select>') +
+      (esYo ? '' : u.activo
+        ? '<button class="boton peligro chico" data-accion="desactivar"' + datos + '>Desactivar</button>'
+        : '<button class="boton secundario chico" data-accion="activar"' + datos + '>Activar</button>') +
+      '</div></div>';
+  }
+
+  function accionUsuario(accion, id, nombre, boton) {
+    var m = document.getElementById('m-usuarios');
+    var fallo = function (r) { mensaje(m, r.error); boton.disabled = false; window.scrollTo(0, 0); };
+    if (accion === 'resetear') {
+      if (!confirm('¿Resetear el PIN de ' + nombre + '? Se cerrarán sus sesiones abiertas y tendrá que crear uno nuevo.')) return;
+      boton.disabled = true;
+      return llamar('resetearPin', { id: id }).then(mostrarPinTemporal, fallo);
+    }
+    if (accion === 'desbloquear') {
+      boton.disabled = true;
+      return llamar('desbloquear', { id: id }).then(function () { mostrarUsuarios(nombre + ' quedó desbloqueada.'); }, fallo);
+    }
+    if (accion === 'renombrar') {
+      var nuevo = prompt('Nuevo nombre para ' + nombre + ':', nombre);
+      if (!nuevo || nuevo.trim() === nombre) return;
+      boton.disabled = true;
+      return llamar('editarUsuario', { id: id, cambios: { nombre: nuevo } }).then(function () {
+        if (nombre === estado.nombre) { estado.nombre = nuevo.trim(); guardarPerfil({ nombre: estado.nombre, rol: estado.rol }); }
+        mostrarUsuarios('Nombre actualizado.');
+      }, fallo);
+    }
+    if (accion === 'desactivar' || accion === 'activar') {
+      var activo = accion === 'activar';
+      if (!activo && !confirm('¿Desactivar a ' + nombre + '? No podrá ingresar y se cerrarán sus sesiones abiertas. Sus registros se conservan.')) return;
+      boton.disabled = true;
+      return llamar('editarUsuario', { id: id, cambios: { activo: activo } }).then(function () {
+        mostrarUsuarios(nombre + (activo ? ' quedó activa.' : ' quedó desactivada.'));
+      }, fallo);
+    }
+  }
+
+  function mostrarPinTemporal(r) {
+    document.getElementById('contenido').innerHTML =
+      '<h1>PIN temporal de ' + esc(r.nombre) + '</h1>' +
+      '<div class="tarjeta">' +
+      '  <div class="pin-temporal">' + esc(r.pinTemporal) + '</div>' +
+      '  <div class="mensaje aviso">Anótalo y entrégaselo en persona: <strong>no se volverá a mostrar</strong>. ' +
+      '  Al ingresar, ' + esc(r.nombre) + ' tendrá que crear su propio PIN.</div>' +
+      '  <button class="boton ancho" id="b-listo">Listo, ya lo anoté</button>' +
+      '</div>';
+    document.getElementById('b-listo').addEventListener('click', function () { mostrarUsuarios(); });
+  }
+
+  // ------------------------------------------------------------ Arranque y módulos
+  // Los módulos (ui/Maestros.html…) registran sus vistas en IT.vistas; Index llama IT.arrancar().
+  window.IT = {
+    estado: estado, llamar: llamar, esc: esc, marco: marco, cargando: cargando, avisoFlotante: avisoFlotante,
+    // D91: el rol solo_lectura no ve formularios ni botones para ingresar o cambiar datos (el servidor igual lo impide)
+    soloLectura: function () { return estado.rol === 'solo_lectura'; },
+    selectorPeriodo: selectorPeriodo, sumarMesPeriodo: sumarMesPeriodo,
+    irA: irA, mensaje: mensaje, ocupado: ocupado,
+    fechaHora: fechaHora, nombrePeriodo: nombrePeriodo, miles: miles, uf: uf, montoArriendo: montoArriendo, buscador: buscador, activarBuscador: activarBuscador, vistas: {},
+    arrancar: function () {
+      var tokenGuardado = leerToken();
+      var perfil = leerPerfil();
+      if (historialDisponible()) {
+        google.script.history.setChangeHandler(function (e) {
+          if (!estado.token) return;
+          var v = e && e.location && e.location.hash;
+          irA(vistaValida(v) ? v : 'inicio', null, null, true);
+        });
+      }
+      if (tokenGuardado && perfil) {
+        estado.token = tokenGuardado; estado.nombre = perfil.nombre; estado.rol = perfil.rol;
+        if (!historialDisponible()) return irA(vistaValida(vistaGuardada()) ? vistaGuardada() : 'inicio');
+        estado.vista = null;
+        google.script.url.getLocation(function (loc) {
+          var v = (loc && loc.hash) || vistaGuardada();
+          irA(vistaValida(v) ? v : 'inicio', null, null, true);
+        });
+      } else {
+        mostrarIngreso();
+      }
+    },
+  };
+})();
+</script>
